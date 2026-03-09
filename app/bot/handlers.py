@@ -12,6 +12,7 @@ from app.ai.recommendations import RecommendationEngine
 from app.database.db import SessionLocal
 from app.database.models import Activity, EnergyCost, Habit, Task, TaskStatus, User
 from app.integrations.google_calendar import GoogleCalendarService
+from app.integrations.openai_client import OpenAIClient
 from app.services.habit_tracker import HabitTracker
 from app.services.knowledge_service import KnowledgeService
 from app.services.scheduler import AIScheduler
@@ -232,6 +233,27 @@ async def natural_chat_handler(message: Message) -> None:
                 reply = "YouGile формально подключен, но задач не пришло (0). Нужна проверка API токена/доступа к workspace."
             await message.answer(reply)
             ks.add_turn(role="assistant", content=reply, intent="yougile_check")
+            ks.maybe_learn_from_dialogue(text, reply)
+            return
+
+        if intent == ChatIntent.connections_check:
+            scheduler = AIScheduler()
+            day_start, day_end = scheduler.build_day_window(datetime.utcnow())
+            events = GoogleCalendarService().list_events(user.id, day_start, day_end)
+            yougile_count = SyncService(db).sync_yougile_tasks(user.id)
+            ai_client = OpenAIClient()
+            ai_state = "подключен" if ai_client.provider != "disabled" else "не подключен"
+            ai_label = f"{ai_client.provider}/{ai_client.model}" if ai_client.provider != "disabled" else "disabled"
+            calendar_state = "подключен" if events is not None else "ошибка подключения"
+            yougile_state = "подключен" if yougile_count >= 0 else "ошибка подключения"
+            reply = (
+                "Статус интеграций:\n"
+                f"- Calendar: {calendar_state}, событий сегодня: {len(events)}\n"
+                f"- YouGile: {yougile_state}, задач после sync: {yougile_count}\n"
+                f"- AI: {ai_state} ({ai_label})"
+            )
+            await message.answer(reply)
+            ks.add_turn(role="assistant", content=reply, intent="connections_check")
             ks.maybe_learn_from_dialogue(text, reply)
             return
 
