@@ -55,6 +55,14 @@ class GoogleCalendarService:
         creds = self._get_credentials()
         return build("calendar", "v3", credentials=creds, cache_discovery=False)
 
+    def get_calendar_timezone(self) -> str:
+        try:
+            service = self._client()
+            meta = service.calendars().get(calendarId=self.settings.google_calendar_id).execute()
+            return meta.get("timeZone") or self.settings.timezone
+        except Exception:
+            return self.settings.timezone
+
     def list_events(self, user_id: int, start: datetime, end: datetime) -> list[Event]:
         try:
             service = self._client()

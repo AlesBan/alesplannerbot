@@ -255,8 +255,10 @@ async def natural_chat_handler(message: Message) -> None:
             return
 
         if intent == ChatIntent.connections_check:
-            day_start, day_end = _build_user_day_window_utc(user.timezone or settings.timezone)
-            events = GoogleCalendarService().list_events(user.id, day_start, day_end)
+            gcal = GoogleCalendarService()
+            calendar_tz = gcal.get_calendar_timezone() or user.timezone or settings.timezone
+            day_start, day_end = _build_user_day_window_utc(calendar_tz)
+            events = gcal.list_events(user.id, day_start, day_end)
             yougile_count = SyncService(db).sync_yougile_tasks(user.id)
             ai_client = OpenAIClient()
             ai_state = "подключен" if ai_client.provider != "disabled" else "не подключен"
@@ -265,7 +267,7 @@ async def natural_chat_handler(message: Message) -> None:
             yougile_state = "подключен" if yougile_count >= 0 else "ошибка подключения"
             reply = (
                 "Статус интеграций:\n"
-                f"- Calendar: {calendar_state}, событий сегодня: {len(events)}\n"
+                f"- Calendar: {calendar_state}, TZ: {calendar_tz}, событий сегодня: {len(events)}\n"
                 f"- YouGile: {yougile_state}, задач после sync: {yougile_count}\n"
                 f"- AI: {ai_state} ({ai_label})"
             )
@@ -275,10 +277,12 @@ async def natural_chat_handler(message: Message) -> None:
             return
 
         if intent == ChatIntent.calendar_check:
-            day_start, day_end = _build_user_day_window_utc(user.timezone or settings.timezone)
-            events = GoogleCalendarService().list_events(user.id, day_start, day_end)
+            gcal = GoogleCalendarService()
+            calendar_tz = gcal.get_calendar_timezone() or user.timezone or settings.timezone
+            day_start, day_end = _build_user_day_window_utc(calendar_tz)
+            events = gcal.list_events(user.id, day_start, day_end)
             if events:
-                rows = _format_calendar_events(events, user.timezone or settings.timezone)
+                rows = _format_calendar_events(events, calendar_tz)
                 header = "Да, календарь подключен. События на сегодня:"
                 if response_mode == "calendar_exact":
                     header = "Как в календаре (без преобразований формата), события на сегодня:"
