@@ -123,6 +123,14 @@ class GoogleCalendarService:
         updated = service.events().update(calendarId=self.settings.google_calendar_id, eventId=event_id, body=event).execute()
         return {"id": updated.get("id"), "new_start": new_start.isoformat(), "new_end": new_end.isoformat()}
 
+    def delete_event(self, event_id: str) -> bool:
+        try:
+            service = self._client()
+            service.events().delete(calendarId=self.settings.google_calendar_id, eventId=event_id).execute()
+            return True
+        except Exception:
+            return False
+
     def detect_free_time(self, start: datetime, end: datetime, busy_events: list[Event]) -> list[tuple[datetime, datetime]]:
         windows = [(start, end)]
         for event in sorted(busy_events, key=lambda x: x.start_time):

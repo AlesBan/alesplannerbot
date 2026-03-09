@@ -150,7 +150,7 @@ def _save_calendar_snapshot(context: ContextEngine, events: list, timezone_name:
     except Exception:
         tz = ZoneInfo("UTC")
     payload = {"date": day_label, "timezone": timezone_name, "events": []}
-    for event in events:
+    for idx, event in enumerate(events, start=1):
         start = event.start_time
         end = event.end_time
         if start.tzinfo is None:
@@ -161,6 +161,8 @@ def _save_calendar_snapshot(context: ContextEngine, events: list, timezone_name:
         local_end = end.astimezone(tz)
         payload["events"].append(
             {
+                "index": idx,
+                "event_id": event.calendar_event_id or "",
                 "title": (event.title or "Без названия").strip() or "Без названия",
                 "start": local_start.strftime("%H:%M"),
                 "end": local_end.strftime("%H:%M"),
@@ -195,14 +197,88 @@ def _answer_calendar_follow_up(text: str, context: ContextEngine) -> str | None:
         elif time_match:
             pivot = time_match.group(1)
         if not pivot:
-            return None
-        tail = [row for row in events if row.get("start", "") >= pivot]
+            # Support "после <название события>" using the last snapshot.
+            subject = lower.split("после", 1)[1].strip(" .:-")
+            anchor = None
+            for row in events:
+                title = (row.get("title") or "").lower()
+                if subject and subject in title:
+                    anchor = row
+                    break
+            if not anchor:
+                return None
+            pivot = anchor.get("end")
+        tail = [row for row in events if row.get("start", "") >= (pivot or "00:00")]
         if not tail:
             return f"После {pivot} на {day_label} событий больше нет."
         lines = "\n".join([f"- {row['start']}–{row['end']}  {row['title']}" for row in tail[:30]])
         return f"После {pivot} ({day_label}):\n{lines}"
 
     return None
+
+
+def _is_calendar_delete_request(text: str) -> bool:
+    lower = text.lower()
+    has_delete = any(token in lower for token in ["удали", "удалить", "delete", "remove", "убери"])
+    target = any(token in lower for token in ["событ", "встреч", "календар", "event"])
+    return has_delete and target
+
+
+def _is_calendar_modify_capability_query(text: str) -> bool:
+    lower = text.lower()
+    asks_ability = any(token in lower for token in ["можем", "можешь", "можно", "изменить", "редакт", "перенести", "удалить"])
+    mentions_calendar = any(token in lower for token in ["календар", "событ", "встреч", "event"])
+    is_direct_delete = _is_calendar_delete_request(text)
+    return asks_ability and mentions_calendar and not is_direct_delete
+
+
+def _delete_calendar_event_from_snapshot(text: str, context: ContextEngine, gcal: GoogleCalendarService) -> str:
+    raw = context.get_memory("last_calendar_snapshot")
+    if not raw:
+        return "Сначала покажу события на день, чтобы выбрать точное событие для удаления."
+    try:
+        snapshot = json.loads(raw)
+    except Exception:
+        return "Не удалось прочитать последний список событий. Скажи: 'покажи события на сегодня', затем повтори удаление."
+    events = snapshot.get("events") or []
+    day_label = snapshot.get("date") or "указанный день"
+    if not events:
+        return f"На {day_label} событий нет."
+
+    lower = text.lower()
+    match_by_index = re.search(r"(?:#|номер\s*|id\s*)(\d+)", lower)
+    range_match = re.search(r"(\d{1,2}:\d{2})\s*[–-]\s*(\d{1,2}:\d{2})", text)
+    title_hint = lower
+    for noise in ["удали", "удалить", "delete", "remove", "убери", "событие", "встречу", "встреча", "календарь", "из", "на", "-", "—"]:
+        title_hint = title_hint.replace(noise, " ")
+    title_hint = " ".join(title_hint.split())
+
+    candidates = events
+    if match_by_index:
+        idx = int(match_by_index.group(1))
+        candidates = [row for row in events if int(row.get("index") or 0) == idx]
+    elif range_match:
+        start_time, end_time = range_match.group(1), range_match.group(2)
+        candidates = [row for row in events if row.get("start") == start_time and row.get("end") == end_time]
+        if title_hint:
+            narrowed = [row for row in candidates if title_hint in (row.get("title") or "").lower()]
+            if narrowed:
+                candidates = narrowed
+    elif title_hint:
+        candidates = [row for row in events if title_hint in (row.get("title") or "").lower()]
+
+    candidates = [row for row in candidates if row.get("event_id")]
+    if not candidates:
+        return "Не нашел событие в календаре по этому описанию. Укажи время, например: 'удали событие 13:45-14:00 Обед'."
+    if len(candidates) > 1:
+        rows = "\n".join([f"- #{row['index']} {row['start']}–{row['end']}  {row['title']}" for row in candidates[:8]])
+        return "Нашел несколько событий. Укажи номер:\n" + rows
+
+    target = candidates[0]
+    ok = gcal.delete_event(target["event_id"])
+    if not ok:
+        return "Не получилось удалить событие в Google Calendar. Попробуй еще раз через пару секунд."
+    return f"Удалил событие: {target['start']}–{target['end']}  {target['title']} ({day_label})."
 
 
 @router.message(F.text)
@@ -228,6 +304,30 @@ async def natural_chat_handler(message: Message) -> None:
         if follow_up:
             await message.answer(follow_up)
             ks.add_turn(role="assistant", content=follow_up, intent="calendar_follow_up")
+            return
+
+        if _is_calendar_delete_request(text):
+            gcal = GoogleCalendarService()
+            reply = _delete_calendar_event_from_snapshot(text, context, gcal)
+            await message.answer(reply)
+            ks.add_turn(role="assistant", content=reply, intent="calendar_delete")
+            # Refresh snapshot after successful deletion.
+            if reply.startswith("Удалил событие:"):
+                calendar_tz = gcal.get_calendar_timezone() or user.timezone or settings.timezone
+                day_start, day_end = _build_user_day_window_utc(calendar_tz)
+                day_label = _build_local_day_label(calendar_tz)
+                refreshed = gcal.list_events(user.id, day_start, day_end)
+                _save_calendar_snapshot(context, refreshed, calendar_tz, day_label)
+            return
+
+        if _is_calendar_modify_capability_query(text):
+            reply = (
+                "Да, могу менять календарь: удалять, переносить и добавлять события.\n"
+                "Скажи в формате: 'удали событие 13:45-14:00 Обед' или 'удали событие #13' "
+                "после команды 'покажи события на сегодня'."
+            )
+            await message.answer(reply)
+            ks.add_turn(role="assistant", content=reply, intent="calendar_modify_help")
             return
 
         route = chat_assistant.route_message(text)
