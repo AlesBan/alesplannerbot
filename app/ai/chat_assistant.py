@@ -54,6 +54,24 @@ class ChatAssistant:
             return ChatIntent.complete_task
         return ChatIntent.general_chat
 
+    def route_message(self, text: str) -> dict:
+        """
+        Chat-first orchestration layer:
+        1) Interpret/normalize user request.
+        2) Route to bot intent.
+        3) Keep response style hints for the final answer.
+        """
+        llm_route = self._route_with_llm(text)
+        if llm_route:
+            return llm_route
+        intent = self.detect_intent(text)
+        response_mode = "calendar_exact" if self._wants_exact_calendar(text.lower()) else "default"
+        return {
+            "intent": intent,
+            "normalized_text": text.strip(),
+            "response_mode": response_mode,
+        }
+
     @staticmethod
     def _is_calendar_query(lower: str) -> bool:
         calendar_markers = [
@@ -77,6 +95,54 @@ class ChatAssistant:
             marker in lower for marker in ["openai", "deepseek", "chatgpt", "ии", "ai"]
         )
         return asks_status and target
+
+    @staticmethod
+    def _wants_exact_calendar(lower: str) -> bool:
+        markers = [
+            "точь в точь",
+            "как в календаре",
+            "без изменений",
+            "точно как",
+            "raw",
+            "exact",
+        ]
+        return any(marker in lower for marker in markers)
+
+    def _route_with_llm(self, text: str) -> dict | None:
+        system_prompt = (
+            "Classify the user's message for a productivity assistant. "
+            "Return ONLY strict JSON object with keys: intent, normalized_text, response_mode. "
+            "intent in [add_task, plan_day, suggest_free, weekly_report, sync, calendar_check, "
+            "yougile_check, connections_check, complete_task, general_chat]. "
+            "response_mode in [default, calendar_exact]. "
+            "If message asks for calendar contents, use intent=calendar_check. "
+            "If user asks what integrations are connected, use intent=connections_check. "
+            "normalized_text should keep user meaning, concise."
+        )
+        raw = self.openai.chat_completion(system_prompt, text)
+        if not raw or "AI is disabled" in raw or raw.startswith("AI unavailable:"):
+            return None
+        try:
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if start == -1 or end == -1:
+                return None
+            data = json.loads(raw[start : end + 1])
+            intent_raw = str(data.get("intent") or "").strip()
+            normalized = (str(data.get("normalized_text") or text)).strip() or text.strip()
+            response_mode = str(data.get("response_mode") or "default").strip().lower()
+            valid_intents = {item.value for item in ChatIntent}
+            if intent_raw not in valid_intents:
+                return None
+            if response_mode not in {"default", "calendar_exact"}:
+                response_mode = "calendar_exact" if self._wants_exact_calendar(text.lower()) else "default"
+            return {
+                "intent": ChatIntent(intent_raw),
+                "normalized_text": normalized,
+                "response_mode": response_mode,
+            }
+        except Exception:
+            return None
 
     def parse_task_from_text(self, text: str) -> dict:
         parsed = self._parse_with_llm(text)

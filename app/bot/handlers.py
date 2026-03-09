@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -28,8 +28,11 @@ settings = get_settings()
 def _ensure_user(db, telegram_id: int, name: str) -> User:
     user = db.query(User).filter(User.telegram_id == telegram_id).one_or_none()
     if user:
+        if (not user.timezone or user.timezone == "UTC") and settings.timezone and settings.timezone != "UTC":
+            user.timezone = settings.timezone
+            db.commit()
         return user
-    user = User(telegram_id=telegram_id, name=name or "User", timezone="UTC")
+    user = User(telegram_id=telegram_id, name=name or "User", timezone=settings.timezone or "UTC")
     db.add(user)
     db.commit()
     db.refresh(user)
@@ -117,6 +120,18 @@ def _format_calendar_events(events: list, timezone_name: str) -> str:
     return "\n".join(lines)
 
 
+def _build_user_day_window_utc(timezone_name: str, day_offset: int = 0) -> tuple[datetime, datetime]:
+    try:
+        tz = ZoneInfo(timezone_name)
+    except Exception:
+        tz = ZoneInfo("UTC")
+    now_local = datetime.now(tz)
+    target_day = (now_local + timedelta(days=day_offset)).date()
+    day_start_local = datetime.combine(target_day, datetime.min.time(), tzinfo=tz)
+    day_end_local = day_start_local + timedelta(days=1)
+    return day_start_local.astimezone(timezone.utc), day_end_local.astimezone(timezone.utc)
+
+
 @router.message(F.text)
 async def natural_chat_handler(message: Message) -> None:
     text = (message.text or "").strip()
@@ -135,9 +150,12 @@ async def natural_chat_handler(message: Message) -> None:
             ks.add_turn(role="assistant", content="Sent welcome message", intent="welcome")
             return
 
-        intent = chat_assistant.detect_intent(text)
+        route = chat_assistant.route_message(text)
+        intent = route["intent"]
+        normalized_text = route["normalized_text"]
+        response_mode = route["response_mode"]
         if intent == ChatIntent.add_task:
-            parsed_tasks = chat_assistant.parse_tasks_batch(text)
+            parsed_tasks = chat_assistant.parse_tasks_batch(normalized_text)
             created = [
                 TaskManager(db).create_task(
                     user_id=user.id,
@@ -206,7 +224,7 @@ async def natural_chat_handler(message: Message) -> None:
             return
 
         if intent == ChatIntent.complete_task:
-            maybe_id = next((token for token in text.split() if token.isdigit()), None)
+            maybe_id = next((token for token in normalized_text.split() if token.isdigit()), None)
             if maybe_id:
                 task = TaskManager(db).mark_completed(int(maybe_id))
                 reply = f"Отметил выполненной: {task.title}" if task else "Не нашел задачу с таким id."
@@ -237,8 +255,7 @@ async def natural_chat_handler(message: Message) -> None:
             return
 
         if intent == ChatIntent.connections_check:
-            scheduler = AIScheduler()
-            day_start, day_end = scheduler.build_day_window(datetime.utcnow())
+            day_start, day_end = _build_user_day_window_utc(user.timezone or settings.timezone)
             events = GoogleCalendarService().list_events(user.id, day_start, day_end)
             yougile_count = SyncService(db).sync_yougile_tasks(user.id)
             ai_client = OpenAIClient()
@@ -258,12 +275,14 @@ async def natural_chat_handler(message: Message) -> None:
             return
 
         if intent == ChatIntent.calendar_check:
-            scheduler = AIScheduler()
-            day_start, day_end = scheduler.build_day_window(datetime.utcnow())
+            day_start, day_end = _build_user_day_window_utc(user.timezone or settings.timezone)
             events = GoogleCalendarService().list_events(user.id, day_start, day_end)
             if events:
                 rows = _format_calendar_events(events, user.timezone or settings.timezone)
-                reply = "Да, календарь подключен. События на сегодня:\n" + rows
+                header = "Да, календарь подключен. События на сегодня:"
+                if response_mode == "calendar_exact":
+                    header = "Как в календаре (без преобразований формата), события на сегодня:"
+                reply = header + "\n" + rows
             else:
                 reply = "Календарь подключен, но на сегодня событий не найдено (или календарь не расшарен сервис-аккаунту)."
             await message.answer(reply)
@@ -271,7 +290,7 @@ async def natural_chat_handler(message: Message) -> None:
             ks.maybe_learn_from_dialogue(text, reply)
             return
 
-        reply = ks.reply_with_memory(text)
+        reply = ks.reply_with_memory(normalized_text)
         if not reply:
             reply = "Понял. Если хочешь, напиши задачи на сегодня/завтра, и я сразу их распланирую."
         await message.answer(reply)
