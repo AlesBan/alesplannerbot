@@ -1,6 +1,7 @@
 import json
 import re
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -25,6 +26,7 @@ from app.config import get_settings
 router = Router()
 chat_assistant = ChatAssistant()
 settings = get_settings()
+BACKLOG_PATH = Path("CHAT_IMPROVEMENT_BACKLOG.md")
 
 
 def _ensure_user(db, telegram_id: int, name: str) -> User:
@@ -232,6 +234,21 @@ def _is_calendar_modify_capability_query(text: str) -> bool:
     return asks_ability and mentions_calendar and not is_direct_delete
 
 
+def _append_chat_backlog_item(user_id: int, user_text: str, issue: str) -> None:
+    try:
+        BACKLOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        if not BACKLOG_PATH.exists():
+            BACKLOG_PATH.write_text("# Chat Improvement Backlog\n\n", encoding="utf-8")
+        ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+        row = f"- [{ts}] user={user_id} issue={issue} | message={user_text.strip()}\n"
+        existing = BACKLOG_PATH.read_text(encoding="utf-8")
+        if row in existing:
+            return
+        BACKLOG_PATH.write_text(existing + row, encoding="utf-8")
+    except Exception:
+        pass
+
+
 def _delete_calendar_event_from_snapshot(text: str, context: ContextEngine, gcal: GoogleCalendarService) -> str:
     raw = context.get_memory("last_calendar_snapshot")
     if not raw:
@@ -271,14 +288,62 @@ def _delete_calendar_event_from_snapshot(text: str, context: ContextEngine, gcal
     if not candidates:
         return "Не нашел событие в календаре по этому описанию. Укажи время, например: 'удали событие 13:45-14:00 Обед'."
     if len(candidates) > 1:
+        pending = {"day_label": day_label, "candidates": candidates[:20]}
+        context.set_memory("pending_calendar_delete", json.dumps(pending, ensure_ascii=False))
         rows = "\n".join([f"- #{row['index']} {row['start']}–{row['end']}  {row['title']}" for row in candidates[:8]])
-        return "Нашел несколько событий. Укажи номер:\n" + rows
+        return "Нашел несколько событий. Укажи номер, например: 'удали #13'\n" + rows
 
     target = candidates[0]
     ok = gcal.delete_event(target["event_id"])
     if not ok:
         return "Не получилось удалить событие в Google Calendar. Попробуй еще раз через пару секунд."
+    context.set_memory("pending_calendar_delete", "")
     return f"Удалил событие: {target['start']}–{target['end']}  {target['title']} ({day_label})."
+
+
+def _try_resolve_pending_calendar_delete(text: str, context: ContextEngine, gcal: GoogleCalendarService) -> str | None:
+    raw = context.get_memory("pending_calendar_delete")
+    if not raw:
+        return None
+    try:
+        pending = json.loads(raw)
+    except Exception:
+        context.set_memory("pending_calendar_delete", "")
+        return None
+    candidates = pending.get("candidates") or []
+    if not candidates:
+        context.set_memory("pending_calendar_delete", "")
+        return None
+
+    lower = text.lower().strip()
+    if lower in {"отмена", "cancel", "не надо", "не удаляй"}:
+        context.set_memory("pending_calendar_delete", "")
+        return "Ок, удаление отменил."
+
+    idx_match = re.search(r"(?:#|номер\s*|id\s*|удали\s*#?)(\d+)", lower)
+    time_match = re.search(r"(\d{1,2}:\d{2})\s*[–-]\s*(\d{1,2}:\d{2})", text)
+    title_hint = " ".join(lower.replace("удали", " ").replace("событие", " ").split())
+
+    selected = None
+    if idx_match:
+        idx = int(idx_match.group(1))
+        selected = next((row for row in candidates if int(row.get("index") or 0) == idx), None)
+    elif time_match:
+        start_time, end_time = time_match.group(1), time_match.group(2)
+        selected = next((row for row in candidates if row.get("start") == start_time and row.get("end") == end_time), None)
+    elif title_hint:
+        selected = next((row for row in candidates if title_hint in (row.get("title") or "").lower()), None)
+
+    if not selected:
+        rows = "\n".join([f"- #{row['index']} {row['start']}–{row['end']}  {row['title']}" for row in candidates[:8]])
+        return "Не понял, какое именно удалить. Напиши номер:\n" + rows
+
+    ok = gcal.delete_event(selected.get("event_id") or "")
+    if not ok:
+        return "Не получилось удалить выбранное событие. Попробуй еще раз."
+    context.set_memory("pending_calendar_delete", "")
+    day_label = pending.get("day_label") or "выбранный день"
+    return f"Удалил событие: {selected['start']}–{selected['end']}  {selected['title']} ({day_label})."
 
 
 @router.message(F.text)
@@ -306,11 +371,26 @@ async def natural_chat_handler(message: Message) -> None:
             ks.add_turn(role="assistant", content=follow_up, intent="calendar_follow_up")
             return
 
+        pending_reply = _try_resolve_pending_calendar_delete(text, context, GoogleCalendarService())
+        if pending_reply:
+            await message.answer(pending_reply)
+            ks.add_turn(role="assistant", content=pending_reply, intent="calendar_delete_pending")
+            if pending_reply.startswith("Удалил событие:"):
+                gcal = GoogleCalendarService()
+                calendar_tz = gcal.get_calendar_timezone() or user.timezone or settings.timezone
+                day_start, day_end = _build_user_day_window_utc(calendar_tz)
+                day_label = _build_local_day_label(calendar_tz)
+                refreshed = gcal.list_events(user.id, day_start, day_end)
+                _save_calendar_snapshot(context, refreshed, calendar_tz, day_label)
+            return
+
         if _is_calendar_delete_request(text):
             gcal = GoogleCalendarService()
             reply = _delete_calendar_event_from_snapshot(text, context, gcal)
             await message.answer(reply)
             ks.add_turn(role="assistant", content=reply, intent="calendar_delete")
+            if "Не нашел событие" in reply or "Не получилось" in reply:
+                _append_chat_backlog_item(user.telegram_id, text, "calendar_delete_matching_or_api_error")
             # Refresh snapshot after successful deletion.
             if reply.startswith("Удалил событие:"):
                 calendar_tz = gcal.get_calendar_timezone() or user.timezone or settings.timezone
@@ -412,6 +492,8 @@ async def natural_chat_handler(message: Message) -> None:
                 reply = "Напиши id задачи, например: 'выполнил задачу 12'"
             await message.answer(reply)
             ks.add_turn(role="assistant", content=reply, intent="complete_task")
+            if "Не нашел задачу" in reply or "Напиши id задачи" in reply:
+                _append_chat_backlog_item(user.telegram_id, text, "task_id_fallback_triggered")
             ks.maybe_learn_from_dialogue(text, reply)
             return
 
