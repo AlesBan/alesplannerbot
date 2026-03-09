@@ -1,0 +1,14 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.sqlite3
+life_assistant.db
+credentials/*.json
+!credentials/.gitkeep
+*.log
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
