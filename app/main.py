@@ -7,9 +7,10 @@ from app.ai.context_engine import ContextEngine
 from app.ai.planner import AIPlanner
 from app.ai.recommendations import RecommendationEngine
 from app.config import get_settings
-from app.database.db import Base, engine, get_db
+from app.database.db import Base, SessionLocal, engine, get_db
 from app.database.models import Task, TaskStatus, User
 from app.integrations.google_calendar import GoogleCalendarService
+from app.services.knowledge_service import KnowledgeService
 from app.services.scheduler import AIScheduler
 from app.services.sync_service import SyncService
 from app.services.task_manager import TaskManager
@@ -20,6 +21,8 @@ app = FastAPI(title="Life AI Assistant API")
 @app.on_event("startup")
 def on_startup() -> None:
     Base.metadata.create_all(bind=engine)
+    with SessionLocal() as db:
+        KnowledgeService.seed_global_knowledge(db)
 
 
 @app.get("/health")

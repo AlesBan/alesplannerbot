@@ -1,11 +1,14 @@
 import asyncio
 
 from app.bot.bot import run_bot
-from app.database.db import Base, engine
+from app.database.db import Base, SessionLocal, engine
+from app.services.knowledge_service import KnowledgeService
 
 
 def init_db() -> None:
     Base.metadata.create_all(bind=engine)
+    with SessionLocal() as db:
+        KnowledgeService.seed_global_knowledge(db)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import json
 
 from dateutil import parser as date_parser
 from google.auth.transport.requests import Request
@@ -21,6 +22,13 @@ class GoogleCalendarService:
     def _get_credentials(self):
         credentials_path = Path(self.settings.google_credentials_path)
         token_path = Path(self.settings.google_token_path)
+        if not credentials_path.exists() and self.settings.google_credentials_json:
+            credentials_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                payload = json.loads(self.settings.google_credentials_json)
+                credentials_path.write_text(json.dumps(payload), encoding="utf-8")
+            except Exception:
+                credentials_path.write_text(self.settings.google_credentials_json, encoding="utf-8")
         if not credentials_path.exists():
             raise FileNotFoundError(f"Google credentials file not found: {credentials_path}")
 

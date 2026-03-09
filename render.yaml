@@ -1,0 +1,112 @@
+services:
+  - type: worker
+    name: life-ai-bot
+    runtime: docker
+    region: frankfurt
+    plan: starter
+    dockerContext: .
+    dockerfilePath: ./Dockerfile
+    dockerCommand: python main.py
+    autoDeploy: true
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: DATABASE_URL
+        fromDatabase:
+          name: life-ai-db
+          property: connectionString
+      - key: TIMEZONE
+        value: Europe/Minsk
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-4o-mini
+      - key: DEEPSEEK_API_KEY
+        sync: false
+      - key: DEEPSEEK_BASE_URL
+        value: https://api.deepseek.com
+      - key: DEEPSEEK_MODEL
+        value: deepseek-chat
+      - key: YOU_GILE_API_KEY
+        sync: false
+      - key: YOU_GILE_BASE_URL
+        value: https://yougile.com/api-v2
+      - key: YOU_GILE_EMAIL
+        sync: false
+      - key: YOU_GILE_PASSWORD
+        sync: false
+      - key: GOOGLE_CALENDAR_ID
+        sync: false
+      - key: GOOGLE_CREDENTIALS_PATH
+        value: /tmp/google-credentials.json
+      - key: GOOGLE_CREDENTIALS_JSON
+        sync: false
+      - key: GOOGLE_TOKEN_PATH
+        value: /tmp/google-token.json
+      - key: GOOGLE_SCOPES
+        value: https://www.googleapis.com/auth/calendar
+      - key: MORNING_PLAN_HOUR
+        value: "8"
+      - key: EVENING_REVIEW_HOUR
+        value: "21"
+      - key: MAX_DAILY_WORK_MINUTES
+        value: "480"
+
+  - type: web
+    name: life-ai-api
+    runtime: docker
+    region: frankfurt
+    plan: starter
+    dockerContext: .
+    dockerfilePath: ./Dockerfile
+    dockerCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    autoDeploy: true
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: life-ai-db
+          property: connectionString
+      - key: TIMEZONE
+        value: Europe/Minsk
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-4o-mini
+      - key: DEEPSEEK_API_KEY
+        sync: false
+      - key: DEEPSEEK_BASE_URL
+        value: https://api.deepseek.com
+      - key: DEEPSEEK_MODEL
+        value: deepseek-chat
+      - key: YOU_GILE_API_KEY
+        sync: false
+      - key: YOU_GILE_BASE_URL
+        value: https://yougile.com/api-v2
+      - key: YOU_GILE_EMAIL
+        sync: false
+      - key: YOU_GILE_PASSWORD
+        sync: false
+      - key: GOOGLE_CALENDAR_ID
+        sync: false
+      - key: GOOGLE_CREDENTIALS_PATH
+        value: /tmp/google-credentials.json
+      - key: GOOGLE_CREDENTIALS_JSON
+        sync: false
+      - key: GOOGLE_TOKEN_PATH
+        value: /tmp/google-token.json
+      - key: GOOGLE_SCOPES
+        value: https://www.googleapis.com/auth/calendar
+      - key: MORNING_PLAN_HOUR
+        value: "8"
+      - key: EVENING_REVIEW_HOUR
+        value: "21"
+      - key: MAX_DAILY_WORK_MINUTES
+        value: "480"
+
+databases:
+  - name: life-ai-db
+    region: frankfurt
+    databaseName: life_ai_assistant
+    user: life_ai_assistant
+    plan: free

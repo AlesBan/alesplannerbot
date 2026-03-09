@@ -5,8 +5,13 @@ Production-ready modular Python project for a Telegram AI assistant that helps w
 ## Features
 
 - Telegram bot with commands: `/start`, `/add`, `/plan`, `/sync`, `/free`, `/report`
+- Natural chat mode (no commands required): bot detects intent from plain messages
+- Learning conversation memory: bot stores dialogue, learns Q/A patterns, and adapts responses over time
 - Voice-to-task flow (voice message -> transcription -> task creation)
 - AI planning engine with burnout-aware prompting
+- LLM provider support:
+  - DeepSeek (`DEEPSEEK_API_KEY`) - preferred when provided
+  - OpenAI (`OPENAI_API_KEY`) - fallback
 - AI scheduler:
   - reads calendar events
   - detects free slots
@@ -14,6 +19,10 @@ Production-ready modular Python project for a Telegram AI assistant that helps w
   - matches tasks by energy profile
   - enforces rest buffers and daily work cap
 - Context memory layer (`user_memory`) with helper API (`get_memory`, `set_memory`)
+- Knowledge base layer:
+  - `knowledge_items` (global + user-specific knowledge snippets)
+  - `conversation_turns` (chat history)
+  - `learned_qa` (auto-learned question/answer patterns)
 - Recommendation engine for activity suggestions based on free time, fatigue, season, and location
 - Habit tracking with overdue detection
 - FastAPI endpoints for health, scheduling, and reporting
@@ -22,6 +31,7 @@ Production-ready modular Python project for a Telegram AI assistant that helps w
   - morning plan notification
   - evening review notification
   - periodic YouGile sync
+  - proactive nudges for overdue habits and urgent unscheduled tasks
 - Docker-ready deployment
 
 ## Project Structure
@@ -82,6 +92,26 @@ main.py
 ## Docker
 
 - `docker compose up --build`
+
+## Cloud Deploy (Supported Region)
+
+Use Render in `frankfurt` region to run bot/API from a supported location.
+
+1. Push latest code to GitHub.
+2. In Render: **New +** -> **Blueprint** -> select this repository.
+3. Render reads `render.yaml` and creates:
+   - `life-ai-bot` (worker)
+   - `life-ai-api` (web)
+   - `life-ai-db` (Postgres)
+4. Set required secret env vars in Render:
+   - `TELEGRAM_BOT_TOKEN`
+   - `OPENAI_API_KEY` (or `DEEPSEEK_API_KEY`)
+   - `GOOGLE_CALENDAR_ID`
+   - `GOOGLE_CREDENTIALS_JSON` (paste full JSON content)
+   - `YOU_GILE_API_KEY` (or `YOU_GILE_EMAIL` + `YOU_GILE_PASSWORD`)
+5. Deploy and check:
+   - API health: `https://<life-ai-api-domain>/health`
+   - Bot logs in Render dashboard.
 
 ## Data Model Highlights
 
