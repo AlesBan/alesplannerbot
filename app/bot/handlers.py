@@ -1,3 +1,5 @@
+import json
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -86,7 +88,7 @@ def _build_plan_payload(db, user: User) -> dict[str, Any]:
     return {"scheduled": scheduled, "lines": lines, "synced_count": synced_count, "ai_text": ai_text, "overdue_text": overdue_text}
 
 
-def _format_calendar_events(events: list, timezone_name: str) -> str:
+def _format_calendar_events(events: list, timezone_name: str, max_items: int | None = 20) -> str:
     if not events:
         return "На сегодня событий нет."
     try:
@@ -95,7 +97,8 @@ def _format_calendar_events(events: list, timezone_name: str) -> str:
         tz = ZoneInfo("UTC")
 
     lines: list[str] = []
-    for event in events[:15]:
+    iter_events = events if max_items is None else events[:max_items]
+    for event in iter_events:
         start = event.start_time
         end = event.end_time
         if start.tzinfo is None:
@@ -132,6 +135,76 @@ def _build_user_day_window_utc(timezone_name: str, day_offset: int = 0) -> tuple
     return day_start_local.astimezone(timezone.utc), day_end_local.astimezone(timezone.utc)
 
 
+def _build_local_day_label(timezone_name: str, day_offset: int = 0) -> str:
+    try:
+        tz = ZoneInfo(timezone_name)
+    except Exception:
+        tz = ZoneInfo("UTC")
+    day = (datetime.now(tz) + timedelta(days=day_offset)).date()
+    return day.strftime("%d.%m.%Y")
+
+
+def _save_calendar_snapshot(context: ContextEngine, events: list, timezone_name: str, day_label: str) -> None:
+    try:
+        tz = ZoneInfo(timezone_name)
+    except Exception:
+        tz = ZoneInfo("UTC")
+    payload = {"date": day_label, "timezone": timezone_name, "events": []}
+    for event in events:
+        start = event.start_time
+        end = event.end_time
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=ZoneInfo("UTC"))
+        if end.tzinfo is None:
+            end = end.replace(tzinfo=ZoneInfo("UTC"))
+        local_start = start.astimezone(tz)
+        local_end = end.astimezone(tz)
+        payload["events"].append(
+            {
+                "title": (event.title or "Без названия").strip() or "Без названия",
+                "start": local_start.strftime("%H:%M"),
+                "end": local_end.strftime("%H:%M"),
+            }
+        )
+    context.set_memory("last_calendar_snapshot", json.dumps(payload, ensure_ascii=False))
+
+
+def _answer_calendar_follow_up(text: str, context: ContextEngine) -> str | None:
+    raw = context.get_memory("last_calendar_snapshot")
+    if not raw:
+        return None
+    try:
+        snapshot = json.loads(raw)
+        events = snapshot.get("events") or []
+        day_label = snapshot.get("date") or "неизвестная дата"
+    except Exception:
+        return None
+    if not events:
+        return None
+
+    lower = text.lower()
+    if any(k in lower for k in ["на какое число", "какое число", "какая дата", "за какой день", "что за день"]):
+        return f"Это расписание за {day_label}."
+
+    if "после" in lower:
+        range_match = re.search(r"(\d{1,2}:\d{2})\s*[–-]\s*(\d{1,2}:\d{2})", text)
+        time_match = re.search(r"(\d{1,2}:\d{2})", text)
+        pivot = None
+        if range_match:
+            pivot = range_match.group(2)
+        elif time_match:
+            pivot = time_match.group(1)
+        if not pivot:
+            return None
+        tail = [row for row in events if row.get("start", "") >= pivot]
+        if not tail:
+            return f"После {pivot} на {day_label} событий больше нет."
+        lines = "\n".join([f"- {row['start']}–{row['end']}  {row['title']}" for row in tail[:30]])
+        return f"После {pivot} ({day_label}):\n{lines}"
+
+    return None
+
+
 @router.message(F.text)
 async def natural_chat_handler(message: Message) -> None:
     text = (message.text or "").strip()
@@ -140,6 +213,7 @@ async def natural_chat_handler(message: Message) -> None:
     with SessionLocal() as db:
         user = _ensure_user(db, message.from_user.id, message.from_user.full_name if message.from_user else "User")
         ks = KnowledgeService(db, user.id)
+        context = ContextEngine(db, user.id)
         ks.add_turn(role="user", content=text, intent="incoming")
         ks.learn_from_message(text)
 
@@ -148,6 +222,12 @@ async def natural_chat_handler(message: Message) -> None:
             ContextEngine(db, user.id).set_memory("weekly_rest_hours", "0")
             await _send_welcome(message)
             ks.add_turn(role="assistant", content="Sent welcome message", intent="welcome")
+            return
+
+        follow_up = _answer_calendar_follow_up(text, context)
+        if follow_up:
+            await message.answer(follow_up)
+            ks.add_turn(role="assistant", content=follow_up, intent="calendar_follow_up")
             return
 
         route = chat_assistant.route_message(text)
@@ -280,18 +360,20 @@ async def natural_chat_handler(message: Message) -> None:
             gcal = GoogleCalendarService()
             calendar_tz = gcal.get_calendar_timezone() or user.timezone or settings.timezone
             day_start, day_end = _build_user_day_window_utc(calendar_tz)
+            day_label = _build_local_day_label(calendar_tz)
             events = gcal.list_events(user.id, day_start, day_end)
             if events:
-                rows = _format_calendar_events(events, calendar_tz)
-                header = "Да, календарь подключен. События на сегодня:"
+                is_exact = response_mode == "calendar_exact"
+                rows = _format_calendar_events(events, calendar_tz, max_items=None if is_exact else 20)
+                header = f"Да, календарь подключен. События на {day_label}:"
                 if response_mode == "calendar_exact":
-                    header = "Как в календаре (без преобразований формата), события на сегодня:"
+                    header = f"Как в календаре (без преобразований формата), события на {day_label}:"
                 reply = header + "\n" + rows
+                _save_calendar_snapshot(context, events, calendar_tz, day_label)
             else:
                 reply = "Календарь подключен, но на сегодня событий не найдено (или календарь не расшарен сервис-аккаунту)."
             await message.answer(reply)
             ks.add_turn(role="assistant", content=reply, intent="calendar_check")
-            ks.maybe_learn_from_dialogue(text, reply)
             return
 
         reply = ks.reply_with_memory(normalized_text)
