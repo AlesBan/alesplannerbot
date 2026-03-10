@@ -10,6 +10,7 @@ from app.integrations.openai_client import OpenAIClient
 
 
 class ChatIntent(str, Enum):
+    welcome = "welcome"
     add_task = "add_task"
     plan_day = "plan_day"
     suggest_free = "suggest_free"
@@ -18,6 +19,10 @@ class ChatIntent(str, Enum):
     calendar_check = "calendar_check"
     yougile_check = "yougile_check"
     connections_check = "connections_check"
+    calendar_follow_up = "calendar_follow_up"
+    calendar_delete = "calendar_delete"
+    calendar_delete_pending = "calendar_delete_pending"
+    calendar_modify_help = "calendar_modify_help"
     complete_task = "complete_task"
     general_chat = "general_chat"
 
@@ -25,34 +30,6 @@ class ChatIntent(str, Enum):
 class ChatAssistant:
     def __init__(self) -> None:
         self.openai = OpenAIClient()
-
-    def detect_intent(self, text: str) -> ChatIntent:
-        lower = text.lower().strip()
-        if "/start" in lower:
-            return ChatIntent.general_chat
-        if self._is_connections_query(lower):
-            return ChatIntent.connections_check
-        if self._is_calendar_query(lower):
-            return ChatIntent.calendar_check
-        if self._is_yougile_query(lower):
-            return ChatIntent.yougile_check
-        if any(k in lower for k in ["добавь задачу", "add task", "задача", "запланируй задачу"]):
-            return ChatIntent.add_task
-        if any(k in lower for k in ["сегодня", "завтра", "послезавтра", "today", "tomorrow"]) and any(
-            k in lower for k in ["надо", "нужно", "сделать", "задач", "task", "todo", "plan task", "добав"]
-        ):
-            return ChatIntent.add_task
-        if any(k in lower for k in ["план на день", "распланируй", "спланируй", "plan day", "plan my day"]):
-            return ChatIntent.plan_day
-        if any(k in lower for k in ["чем заняться", "свободное время", "free time", "suggest activity"]):
-            return ChatIntent.suggest_free
-        if any(k in lower for k in ["отчет", "report", "продуктивность", "неделя"]):
-            return ChatIntent.weekly_report
-        if any(k in lower for k in ["синк", "sync", "yougile"]):
-            return ChatIntent.sync
-        if any(k in lower for k in ["выполнил задачу", "complete task", "done task"]):
-            return ChatIntent.complete_task
-        return ChatIntent.general_chat
 
     def route_message(self, text: str) -> dict:
         """
@@ -64,59 +41,28 @@ class ChatAssistant:
         llm_route = self._route_with_llm(text)
         if llm_route:
             return llm_route
-        intent = self.detect_intent(text)
-        response_mode = "calendar_exact" if self._wants_exact_calendar(text.lower()) else "default"
         return {
-            "intent": intent,
+            "intent": ChatIntent.general_chat,
             "normalized_text": text.strip(),
-            "response_mode": response_mode,
+            "response_mode": "default",
+            "params": {},
         }
-
-    @staticmethod
-    def _is_calendar_query(lower: str) -> bool:
-        calendar_markers = [
-            "календар",
-            "клаендар",
-            "calendar",
-            "расписани",
-            "планы на сегодня",
-            "что сегодня",
-            "события на сегодня",
-        ]
-        return any(marker in lower for marker in calendar_markers)
-
-    @staticmethod
-    def _is_yougile_query(lower: str) -> bool:
-        return any(marker in lower for marker in ["yougile", "югиле", "югайл", "юджайл"])
-
-    def _is_connections_query(self, lower: str) -> bool:
-        asks_status = any(marker in lower for marker in ["подключ", "доступ", "работа", "статус", "connected"])
-        target = self._is_calendar_query(lower) or self._is_yougile_query(lower) or any(
-            marker in lower for marker in ["openai", "deepseek", "chatgpt", "ии", "ai"]
-        )
-        return asks_status and target
-
-    @staticmethod
-    def _wants_exact_calendar(lower: str) -> bool:
-        markers = [
-            "точь в точь",
-            "как в календаре",
-            "без изменений",
-            "точно как",
-            "raw",
-            "exact",
-        ]
-        return any(marker in lower for marker in markers)
 
     def _route_with_llm(self, text: str) -> dict | None:
         system_prompt = (
-            "Classify the user's message for a productivity assistant. "
-            "Return ONLY strict JSON object with keys: intent, normalized_text, response_mode. "
-            "intent in [add_task, plan_day, suggest_free, weekly_report, sync, calendar_check, "
-            "yougile_check, connections_check, complete_task, general_chat]. "
+            "You are a chat-orchestrator for a productivity assistant. "
+            "Decide which backend action to run. "
+            "Return ONLY strict JSON object with keys: intent, normalized_text, response_mode, params. "
+            "intent in [welcome, add_task, plan_day, suggest_free, weekly_report, sync, calendar_check, "
+            "yougile_check, connections_check, calendar_follow_up, calendar_delete, calendar_delete_pending, "
+            "calendar_modify_help, complete_task, general_chat]. "
             "response_mode in [default, calendar_exact]. "
-            "If message asks for calendar contents, use intent=calendar_check. "
-            "If user asks what integrations are connected, use intent=connections_check. "
+            "Use calendar_follow_up for follow-up questions about the last shown calendar list. "
+            "Use calendar_delete when user asks to delete calendar events. "
+            "Use calendar_delete_pending when user is clarifying which event to delete. "
+            "Use calendar_modify_help when user asks if calendar can be edited. "
+            "Do not choose complete_task for calendar deletion requests. "
+            "params is an object with extracted fields if useful (task_id, day_offset, delete_hint). "
             "normalized_text should keep user meaning, concise."
         )
         raw = self.openai.chat_completion(system_prompt, text)
@@ -135,11 +81,12 @@ class ChatAssistant:
             if intent_raw not in valid_intents:
                 return None
             if response_mode not in {"default", "calendar_exact"}:
-                response_mode = "calendar_exact" if self._wants_exact_calendar(text.lower()) else "default"
+                response_mode = "default"
             return {
                 "intent": ChatIntent(intent_raw),
                 "normalized_text": normalized,
                 "response_mode": response_mode,
+                "params": data.get("params") if isinstance(data.get("params"), dict) else {},
             }
         except Exception:
             return None

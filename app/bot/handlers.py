@@ -219,21 +219,6 @@ def _answer_calendar_follow_up(text: str, context: ContextEngine) -> str | None:
     return None
 
 
-def _is_calendar_delete_request(text: str) -> bool:
-    lower = text.lower()
-    has_delete = any(token in lower for token in ["удали", "удалить", "delete", "remove", "убери"])
-    target = any(token in lower for token in ["событ", "встреч", "календар", "event"])
-    return has_delete and target
-
-
-def _is_calendar_modify_capability_query(text: str) -> bool:
-    lower = text.lower()
-    asks_ability = any(token in lower for token in ["можем", "можешь", "можно", "изменить", "редакт", "перенести", "удалить"])
-    mentions_calendar = any(token in lower for token in ["календар", "событ", "встреч", "event"])
-    is_direct_delete = _is_calendar_delete_request(text)
-    return asks_ability and mentions_calendar and not is_direct_delete
-
-
 def _append_chat_backlog_item(user_id: int, user_text: str, issue: str) -> None:
     try:
         BACKLOG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -358,35 +343,21 @@ async def natural_chat_handler(message: Message) -> None:
         ks.add_turn(role="user", content=text, intent="incoming")
         ks.learn_from_message(text)
 
-        if text.lower() in {"/start", "start", "привет", "hello"}:
+        route = chat_assistant.route_message(text)
+        intent = route["intent"]
+        normalized_text = route["normalized_text"]
+        response_mode = route["response_mode"]
+
+        if text.lower() == "/start" or intent == ChatIntent.welcome:
             ContextEngine(db, user.id).set_memory("weekly_work_hours", "0")
             ContextEngine(db, user.id).set_memory("weekly_rest_hours", "0")
             await _send_welcome(message)
             ks.add_turn(role="assistant", content="Sent welcome message", intent="welcome")
             return
 
-        follow_up = _answer_calendar_follow_up(text, context)
-        if follow_up:
-            await message.answer(follow_up)
-            ks.add_turn(role="assistant", content=follow_up, intent="calendar_follow_up")
-            return
-
-        pending_reply = _try_resolve_pending_calendar_delete(text, context, GoogleCalendarService())
-        if pending_reply:
-            await message.answer(pending_reply)
-            ks.add_turn(role="assistant", content=pending_reply, intent="calendar_delete_pending")
-            if pending_reply.startswith("Удалил событие:"):
-                gcal = GoogleCalendarService()
-                calendar_tz = gcal.get_calendar_timezone() or user.timezone or settings.timezone
-                day_start, day_end = _build_user_day_window_utc(calendar_tz)
-                day_label = _build_local_day_label(calendar_tz)
-                refreshed = gcal.list_events(user.id, day_start, day_end)
-                _save_calendar_snapshot(context, refreshed, calendar_tz, day_label)
-            return
-
-        if _is_calendar_delete_request(text):
+        if intent == ChatIntent.calendar_delete:
             gcal = GoogleCalendarService()
-            reply = _delete_calendar_event_from_snapshot(text, context, gcal)
+            reply = _delete_calendar_event_from_snapshot(normalized_text, context, gcal)
             await message.answer(reply)
             ks.add_turn(role="assistant", content=reply, intent="calendar_delete")
             if "Не нашел событие" in reply or "Не получилось" in reply:
@@ -400,7 +371,30 @@ async def natural_chat_handler(message: Message) -> None:
                 _save_calendar_snapshot(context, refreshed, calendar_tz, day_label)
             return
 
-        if _is_calendar_modify_capability_query(text):
+        if intent == ChatIntent.calendar_delete_pending:
+            pending_reply = _try_resolve_pending_calendar_delete(normalized_text, context, GoogleCalendarService())
+            if not pending_reply:
+                pending_reply = "Уточни, какое событие удалить: например 'удали #13' или 'отмена'."
+            await message.answer(pending_reply)
+            ks.add_turn(role="assistant", content=pending_reply, intent="calendar_delete_pending")
+            if pending_reply.startswith("Удалил событие:"):
+                gcal = GoogleCalendarService()
+                calendar_tz = gcal.get_calendar_timezone() or user.timezone or settings.timezone
+                day_start, day_end = _build_user_day_window_utc(calendar_tz)
+                day_label = _build_local_day_label(calendar_tz)
+                refreshed = gcal.list_events(user.id, day_start, day_end)
+                _save_calendar_snapshot(context, refreshed, calendar_tz, day_label)
+            return
+
+        if intent == ChatIntent.calendar_follow_up:
+            follow_up = _answer_calendar_follow_up(normalized_text, context)
+            if not follow_up:
+                follow_up = "Уточни вопрос по последнему списку календаря, и я отвечу точечно."
+            await message.answer(follow_up)
+            ks.add_turn(role="assistant", content=follow_up, intent="calendar_follow_up")
+            return
+
+        if intent == ChatIntent.calendar_modify_help:
             reply = (
                 "Да, могу менять календарь: удалять, переносить и добавлять события.\n"
                 "Скажи в формате: 'удали событие 13:45-14:00 Обед' или 'удали событие #13' "
@@ -409,11 +403,6 @@ async def natural_chat_handler(message: Message) -> None:
             await message.answer(reply)
             ks.add_turn(role="assistant", content=reply, intent="calendar_modify_help")
             return
-
-        route = chat_assistant.route_message(text)
-        intent = route["intent"]
-        normalized_text = route["normalized_text"]
-        response_mode = route["response_mode"]
         if intent == ChatIntent.add_task:
             parsed_tasks = chat_assistant.parse_tasks_batch(normalized_text)
             created = [
