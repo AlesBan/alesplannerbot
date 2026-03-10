@@ -7,7 +7,7 @@ services:
     dockerContext: .
     dockerfilePath: ./Dockerfile
     dockerCommand: python main.py
-    autoDeploy: true
+    autoDeploy: false
     envVars:
       - key: TELEGRAM_BOT_TOKEN
         sync: false
@@ -60,7 +60,7 @@ services:
     dockerContext: .
     dockerfilePath: ./Dockerfile
     dockerCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
-    autoDeploy: true
+    autoDeploy: false
     healthCheckPath: /health
     envVars:
       - key: DATABASE_URL
