@@ -11,6 +11,7 @@ from app.integrations.openai_client import OpenAIClient
 
 class ChatIntent(str, Enum):
     welcome = "welcome"
+    calendar_add = "calendar_add"
     add_task = "add_task"
     plan_day = "plan_day"
     suggest_free = "suggest_free"
@@ -53,7 +54,7 @@ class ChatAssistant:
             "You are a chat-orchestrator for a productivity assistant. "
             "Decide which backend action to run. "
             "Return ONLY strict JSON object with keys: intent, normalized_text, response_mode, params. "
-            "intent in [welcome, add_task, plan_day, suggest_free, weekly_report, sync, calendar_check, "
+            "intent in [welcome, calendar_add, add_task, plan_day, suggest_free, weekly_report, sync, calendar_check, "
             "yougile_check, connections_check, calendar_follow_up, calendar_delete, calendar_delete_pending, "
             "calendar_modify_help, complete_task, general_chat]. "
             "response_mode in [default, calendar_exact]. "
@@ -61,6 +62,8 @@ class ChatAssistant:
             "Use calendar_delete when user asks to delete calendar events. "
             "Use calendar_delete_pending when user is clarifying which event to delete. "
             "Use calendar_modify_help when user asks if calendar can be edited. "
+            "Use calendar_add when user asks to add/put/create an event in calendar or schedule by time. "
+            "For calendar_add extract params: title, start_time(HH:MM), end_time(HH:MM), day_offset(0=today,1=tomorrow). "
             "If user asks about today's plans/schedule/events, ALWAYS choose calendar_check. "
             "Never use add_task or plan_day for 'what are my plans today' style questions. "
             "Use plan_day only when user explicitly asks to optimize/reschedule tasks (not just read schedule). "

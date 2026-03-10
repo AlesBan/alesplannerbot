@@ -160,6 +160,63 @@ def _build_local_day_label(timezone_name: str, day_offset: int = 0) -> str:
     return day.strftime("%d.%m.%Y")
 
 
+def _parse_hhmm(value: str | None) -> tuple[int, int] | None:
+    if not value:
+        return None
+    match = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*", value)
+    if not match:
+        return None
+    hh = int(match.group(1))
+    mm = int(match.group(2))
+    if hh < 0 or hh > 23 or mm < 0 or mm > 59:
+        return None
+    return hh, mm
+
+
+def _resolve_calendar_add_params(text: str, params: dict, timezone_name: str) -> dict | None:
+    try:
+        tz = ZoneInfo(timezone_name)
+    except Exception:
+        tz = ZoneInfo("UTC")
+
+    day_offset = int(params.get("day_offset") or 0)
+    now_local = datetime.now(tz)
+    target_day = (now_local + timedelta(days=day_offset)).date()
+
+    start_str = (params.get("start_time") or "").strip()
+    end_str = (params.get("end_time") or "").strip()
+
+    if not start_str or not end_str:
+        range_match = re.search(r"(\d{1,2}:\d{2})\s*[–-]\s*(\d{1,2}:\d{2})", text)
+        if range_match:
+            start_str = start_str or range_match.group(1)
+            end_str = end_str or range_match.group(2)
+
+    start_hm = _parse_hhmm(start_str)
+    end_hm = _parse_hhmm(end_str)
+    if not start_hm or not end_hm:
+        return None
+
+    start_local = datetime(target_day.year, target_day.month, target_day.day, start_hm[0], start_hm[1], tzinfo=tz)
+    end_local = datetime(target_day.year, target_day.month, target_day.day, end_hm[0], end_hm[1], tzinfo=tz)
+    if end_local <= start_local:
+        end_local = end_local + timedelta(days=1)
+
+    title = (params.get("title") or "").strip()
+    if not title:
+        cleaned = re.sub(r"\b\d{1,2}:\d{2}\b", "", text)
+        cleaned = re.sub(r"[–-]", " ", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" .,-")
+        title = cleaned or "Новое событие"
+
+    return {
+        "title": title,
+        "start_local": start_local,
+        "end_local": end_local,
+        "day_label": target_day.strftime("%d.%m.%Y"),
+    }
+
+
 def _save_calendar_snapshot(context: ContextEngine, events: list, timezone_name: str, day_label: str) -> None:
     try:
         tz = ZoneInfo(timezone_name)
@@ -361,6 +418,7 @@ async def natural_chat_handler(message: Message) -> None:
         intent = route["intent"]
         normalized_text = route["normalized_text"]
         response_mode = route["response_mode"]
+        params = route.get("params") if isinstance(route.get("params"), dict) else {}
 
         if text.lower() == "/start" or intent == ChatIntent.welcome:
             ContextEngine(db, user.id).set_memory("weekly_work_hours", "0")
@@ -375,6 +433,41 @@ async def natural_chat_handler(message: Message) -> None:
             ) or "Готов работать в формате чата и помогать с календарем, задачами и планированием."
             await message.answer(reply)
             ks.add_turn(role="assistant", content="Sent welcome message", intent="welcome")
+            return
+
+        if intent == ChatIntent.calendar_add or intent == ChatIntent.add_task:
+            gcal = GoogleCalendarService()
+            calendar_tz = gcal.get_calendar_timezone() or user.timezone or settings.timezone
+            payload = _resolve_calendar_add_params(normalized_text, params, calendar_tz)
+            if not payload:
+                reply = ks.reply_with_backend_result(
+                    text,
+                    operation="calendar_add_need_details",
+                    payload={"required": ["title", "start_time", "end_time"], "example": "добавь 20:30-21:00 Рисование"},
+                ) or "Уточни время и название, например: 'добавь 20:30-21:00 Рисование'."
+                await message.answer(reply)
+                ks.add_turn(role="assistant", content=reply, intent="calendar_add")
+                return
+
+            created = gcal.add_event(user.id, payload["title"], payload["start_local"], payload["end_local"])
+            day_start, day_end = _build_user_day_window_utc(calendar_tz)
+            refreshed = gcal.list_events(user.id, day_start, day_end)
+            _save_calendar_snapshot(context, refreshed, calendar_tz, payload["day_label"])
+
+            reply = ks.reply_with_backend_result(
+                text,
+                operation="calendar_add_success",
+                payload={
+                    "created_event_id": created.get("id"),
+                    "title": payload["title"],
+                    "start": payload["start_local"].strftime("%H:%M"),
+                    "end": payload["end_local"].strftime("%H:%M"),
+                    "date": payload["day_label"],
+                    "timezone": calendar_tz,
+                },
+            ) or f"Добавил в календарь: {payload['start_local'].strftime('%H:%M')}–{payload['end_local'].strftime('%H:%M')} {payload['title']} ({payload['day_label']})."
+            await message.answer(reply)
+            ks.add_turn(role="assistant", content=reply, intent="calendar_add")
             return
 
         if intent == ChatIntent.calendar_delete:
@@ -429,29 +522,6 @@ async def natural_chat_handler(message: Message) -> None:
             await message.answer(reply)
             ks.add_turn(role="assistant", content=reply, intent="calendar_modify_help")
             return
-        if intent == ChatIntent.add_task:
-            parsed_tasks = chat_assistant.parse_tasks_batch(normalized_text)
-            created = [
-                TaskManager(db).create_task(
-                    user_id=user.id,
-                    title=item["title"],
-                    duration_minutes=item["duration_minutes"],
-                    priority=item["priority"],
-                    deadline=item["deadline"],
-                    energy_cost=item["energy_cost"],
-                )
-                for item in parsed_tasks
-            ]
-            plan = _build_plan_payload(db, user)
-            created_text = "\n".join([f"- {task.title} ({task.duration_minutes}m)" for task in created[:8]])
-            reply = f"Добавил:\n{created_text}"
-            if plan["scheduled"]:
-                reply += "\n\nПлан:\n" + "\n".join(plan["lines"])
-            await message.answer(reply)
-            ks.add_turn(role="assistant", content=reply, intent="add_task")
-            ks.maybe_learn_from_dialogue(text, reply)
-            return
-
         if intent == ChatIntent.plan_day:
             # For this user flow, "plan for today" must come strictly from Google Calendar.
             gcal = GoogleCalendarService()
