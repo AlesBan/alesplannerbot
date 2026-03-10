@@ -402,6 +402,23 @@ def _try_resolve_pending_calendar_delete(text: str, context: ContextEngine, gcal
     return f"Удалил событие: {selected['start']}–{selected['end']}  {selected['title']} ({day_label})."
 
 
+class _TextProxyMessage:
+    def __init__(self, original: Message, text: str) -> None:
+        self._original = original
+        self.text = text
+        self.from_user = original.from_user
+        self.bot = original.bot
+
+    async def answer(self, *args, **kwargs):
+        return await self._original.answer(*args, **kwargs)
+
+
+async def _handle_incoming_text(message: Message, text: str, source: str = "text") -> None:
+    _ = source
+    proxy = _TextProxyMessage(message, text)
+    await natural_chat_handler(proxy)  # Reuse the same orchestrated text pipeline.
+
+
 @router.message(F.text)
 async def natural_chat_handler(message: Message) -> None:
     text = (message.text or "").strip()

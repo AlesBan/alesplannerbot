@@ -3,10 +3,7 @@ from pathlib import Path
 from aiogram import Router
 from aiogram.types import Message
 
-from app.database.db import SessionLocal
-from app.database.models import EnergyCost, PriorityLevel
-from app.services.task_manager import TaskManager
-from app.bot.handlers import _ensure_user
+from app.bot.handlers import _handle_incoming_text
 from app.utils.voice_utils import transcribe_voice
 
 router = Router()
@@ -20,17 +17,10 @@ async def handle_voice_task(message: Message) -> None:
 
     try:
         transcript = transcribe_voice(str(temp_path))
-        title = transcript[:100] if transcript else "Voice task"
-        with SessionLocal() as db:
-            user = _ensure_user(db, message.from_user.id, message.from_user.full_name if message.from_user else "User")
-            task = TaskManager(db).create_task(
-                user_id=user.id,
-                title=title,
-                duration_minutes=30,
-                priority=PriorityLevel.medium,
-                energy_cost=EnergyCost.medium,
-            )
-        await message.answer(f"Voice task captured: {task.title}")
+        if not transcript:
+            await message.answer("Не удалось распознать голосовое сообщение. Попробуй отправить еще раз.")
+            return
+        await _handle_incoming_text(message, transcript, source="voice")
     finally:
         if temp_path.exists():
             temp_path.unlink()
