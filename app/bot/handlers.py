@@ -427,8 +427,18 @@ async def natural_chat_handler(message: Message) -> None:
             return
 
         if intent == ChatIntent.plan_day:
-            plan = _build_plan_payload(db, user)
-            reply = "Не вижу подходящих слотов сегодня." if not plan["scheduled"] else "Обновил план дня:\n" + "\n".join(plan["lines"])
+            # For this user flow, "plan for today" must come strictly from Google Calendar.
+            gcal = GoogleCalendarService()
+            calendar_tz = gcal.get_calendar_timezone() or user.timezone or settings.timezone
+            day_start, day_end = _build_user_day_window_utc(calendar_tz)
+            day_label = _build_local_day_label(calendar_tz)
+            events = gcal.list_events(user.id, day_start, day_end)
+            if events:
+                rows = _format_calendar_events(events, calendar_tz, max_items=None)
+                reply = f"План на {day_label} (из Google Calendar):\n" + rows
+                _save_calendar_snapshot(context, events, calendar_tz, day_label)
+            else:
+                reply = f"В Google Calendar на {day_label} событий нет."
             await message.answer(reply)
             ks.add_turn(role="assistant", content=reply, intent="plan_day")
             ks.maybe_learn_from_dialogue(text, reply)
