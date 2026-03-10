@@ -141,7 +141,8 @@ class KnowledgeService:
             "Do not use canned/template phrases. "
             "Respond naturally in Russian in user's style. "
             "You receive backend operation facts and must explain result clearly. "
-            "Never invent data. If payload contains schedule rows, preserve times/titles exactly."
+            "Never invent data. If payload contains schedule rows, preserve times/titles exactly. "
+            "Never output synthetic 'План:' blocks or guessed task lists that are absent in payload."
         )
         user_prompt = (
             f"User message:\n{user_message}\n\n"

@@ -453,19 +453,12 @@ async def natural_chat_handler(message: Message) -> None:
             day_start, day_end = _build_user_day_window_utc(calendar_tz)
             refreshed = gcal.list_events(user.id, day_start, day_end)
             _save_calendar_snapshot(context, refreshed, calendar_tz, payload["day_label"])
-
-            reply = ks.reply_with_backend_result(
-                text,
-                operation="calendar_add_success",
-                payload={
-                    "created_event_id": created.get("id"),
-                    "title": payload["title"],
-                    "start": payload["start_local"].strftime("%H:%M"),
-                    "end": payload["end_local"].strftime("%H:%M"),
-                    "date": payload["day_label"],
-                    "timezone": calendar_tz,
-                },
-            ) or f"Добавил в календарь: {payload['start_local'].strftime('%H:%M')}–{payload['end_local'].strftime('%H:%M')} {payload['title']} ({payload['day_label']})."
+            # Deterministic factual confirmation for critical write action.
+            reply = (
+                f"Готово. Добавил в Google Calendar: "
+                f"{payload['start_local'].strftime('%H:%M')}–{payload['end_local'].strftime('%H:%M')} "
+                f"{payload['title']} ({payload['day_label']})."
+            )
             await message.answer(reply)
             ks.add_turn(role="assistant", content=reply, intent="calendar_add")
             return
