@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 
 from sqlalchemy import or_, select
@@ -121,6 +122,29 @@ class KnowledgeService:
             f"Knowledge base:\n{knowledge_blob}\n\n"
             f"Recent dialogue:\n{turns_blob}\n\n"
             "Generate a personalized response in Russian."
+        )
+        response = self.ai.chat_completion(system_prompt, user_prompt)
+        if not response or response.startswith("AI unavailable:") or "AI is disabled" in response:
+            return ""
+        return response.strip()
+
+    def reply_with_backend_result(self, user_message: str, operation: str, payload: dict) -> str:
+        """
+        Generate a natural, non-template response from backend facts.
+        """
+        payload_json = json.dumps(payload, ensure_ascii=False)
+        system_prompt = (
+            "You are a personal assistant chat layer. "
+            "Do not use canned/template phrases. "
+            "Respond naturally in Russian in user's style. "
+            "You receive backend operation facts and must explain result clearly. "
+            "Never invent data. If payload contains schedule rows, preserve times/titles exactly."
+        )
+        user_prompt = (
+            f"User message:\n{user_message}\n\n"
+            f"Operation:\n{operation}\n\n"
+            f"Payload (JSON):\n{payload_json}\n\n"
+            "Write a concise helpful reply in Russian."
         )
         response = self.ai.chat_completion(system_prompt, user_prompt)
         if not response or response.startswith("AI unavailable:") or "AI is disabled" in response:

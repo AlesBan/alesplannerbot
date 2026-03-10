@@ -59,14 +59,6 @@ def _ensure_user(db, telegram_id: int, name: str) -> User:
     return user
 
 
-async def _send_welcome(message: Message) -> None:
-    await message.answer(
-        "Работаем в формате обычного чата.\n"
-        "Пиши свободно: 'Сегодня надо ...', 'Завтра ...'.\n"
-        "Я сам понимаю задачи, запоминаю контекст и адаптирую стиль ответа под тебя."
-    )
-
-
 def _build_plan_payload(db, user: User) -> dict[str, Any]:
     synced_count = SyncService(db).sync_yougile_tasks(user.id)
     task_manager = TaskManager(db)
@@ -351,7 +343,15 @@ async def natural_chat_handler(message: Message) -> None:
         if text.lower() == "/start" or intent == ChatIntent.welcome:
             ContextEngine(db, user.id).set_memory("weekly_work_hours", "0")
             ContextEngine(db, user.id).set_memory("weekly_rest_hours", "0")
-            await _send_welcome(message)
+            reply = ks.reply_with_backend_result(
+                text,
+                operation="welcome",
+                payload={
+                    "mode": "chat_first",
+                    "capabilities": ["calendar_read_write", "yougile_sync", "task_planning", "habit_support"],
+                },
+            ) or "Готов работать в формате чата и помогать с календарем, задачами и планированием."
+            await message.answer(reply)
             ks.add_turn(role="assistant", content="Sent welcome message", intent="welcome")
             return
 
@@ -395,11 +395,15 @@ async def natural_chat_handler(message: Message) -> None:
             return
 
         if intent == ChatIntent.calendar_modify_help:
-            reply = (
-                "Да, могу менять календарь: удалять, переносить и добавлять события.\n"
-                "Скажи в формате: 'удали событие 13:45-14:00 Обед' или 'удали событие #13' "
-                "после команды 'покажи события на сегодня'."
-            )
+            reply = ks.reply_with_backend_result(
+                text,
+                operation="calendar_modify_help",
+                payload={
+                    "supported_actions": ["delete_event", "move_event", "add_event"],
+                    "examples": ["удали событие 13:45-14:00 Обед", "удали событие #13"],
+                    "requires_snapshot": True,
+                },
+            ) or "Могу менять календарь: удалять, переносить и добавлять события."
             await message.answer(reply)
             ks.add_turn(role="assistant", content=reply, intent="calendar_modify_help")
             return
@@ -435,10 +439,18 @@ async def natural_chat_handler(message: Message) -> None:
             events = gcal.list_events(user.id, day_start, day_end)
             if events:
                 rows = _format_calendar_events(events, calendar_tz, max_items=None)
-                reply = f"План на {day_label} (из Google Calendar):\n" + rows
+                reply = ks.reply_with_backend_result(
+                    text,
+                    operation="plan_day_from_calendar",
+                    payload={"date": day_label, "timezone": calendar_tz, "rows_text": rows},
+                ) or f"План на {day_label} (из Google Calendar):\n{rows}"
                 _save_calendar_snapshot(context, events, calendar_tz, day_label)
             else:
-                reply = f"В Google Calendar на {day_label} событий нет."
+                reply = ks.reply_with_backend_result(
+                    text,
+                    operation="plan_day_from_calendar_empty",
+                    payload={"date": day_label, "timezone": calendar_tz},
+                ) or f"В Google Calendar на {day_label} событий нет."
             await message.answer(reply)
             ks.add_turn(role="assistant", content=reply, intent="plan_day")
             ks.maybe_learn_from_dialogue(text, reply)
@@ -546,13 +558,23 @@ async def natural_chat_handler(message: Message) -> None:
             if events:
                 is_exact = response_mode == "calendar_exact"
                 rows = _format_calendar_events(events, calendar_tz, max_items=None if is_exact else 20)
-                header = f"Да, календарь подключен. События на {day_label}:"
-                if response_mode == "calendar_exact":
-                    header = f"Как в календаре (без преобразований формата), события на {day_label}:"
-                reply = header + "\n" + rows
+                reply = ks.reply_with_backend_result(
+                    text,
+                    operation="calendar_check",
+                    payload={
+                        "date": day_label,
+                        "timezone": calendar_tz,
+                        "exact_mode": is_exact,
+                        "rows_text": rows,
+                    },
+                ) or f"События на {day_label}:\n{rows}"
                 _save_calendar_snapshot(context, events, calendar_tz, day_label)
             else:
-                reply = "Календарь подключен, но на сегодня событий не найдено (или календарь не расшарен сервис-аккаунту)."
+                reply = ks.reply_with_backend_result(
+                    text,
+                    operation="calendar_check_empty",
+                    payload={"date": day_label, "timezone": calendar_tz},
+                ) or "На сегодня в календаре событий не найдено."
             await message.answer(reply)
             ks.add_turn(role="assistant", content=reply, intent="calendar_check")
             return
