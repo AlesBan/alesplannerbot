@@ -82,6 +82,28 @@ def _build_plan_payload(db, user: User) -> dict[str, Any]:
     return {"scheduled": scheduled, "lines": lines, "synced_count": synced_count, "ai_text": ai_text, "overdue_text": overdue_text}
 
 
+def _is_greeting_text(text: str) -> bool:
+    clean = re.sub(r"[!.,?\n\r\t]", " ", text.lower()).strip()
+    clean = " ".join(clean.split())
+    return clean in {"привет", "здравствуй", "здравствуйте", "hello", "hi", "hey"}
+
+
+def _allow_greeting_reply(text: str, ks: KnowledgeService) -> bool:
+    if not _is_greeting_text(text):
+        return False
+    recent = ks.get_recent_turns(limit=6)
+    now = datetime.utcnow()
+    for turn in reversed(recent):
+        if turn.role != "assistant":
+            continue
+        content = (turn.content or "").lower()
+        if any(token in content for token in ["привет", "здрав", "hello", "hi"]):
+            if (now - turn.created_at).total_seconds() < 20 * 60:
+                return False
+            break
+    return True
+
+
 def _format_calendar_events(events: list, timezone_name: str, max_items: int | None = 20) -> str:
     if not events:
         return "На сегодня событий нет."
@@ -579,7 +601,8 @@ async def natural_chat_handler(message: Message) -> None:
             ks.add_turn(role="assistant", content=reply, intent="calendar_check")
             return
 
-        reply = ks.reply_with_memory(normalized_text)
+        allow_greeting = _allow_greeting_reply(normalized_text, ks)
+        reply = ks.reply_with_memory(normalized_text, allow_greeting=allow_greeting)
         if not reply:
             reply = "Понял. Если хочешь, напиши задачи на сегодня/завтра, и я сразу их распланирую."
         await message.answer(reply)

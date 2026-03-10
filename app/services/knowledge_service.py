@@ -100,7 +100,7 @@ class KnowledgeService:
         qa_rows = [f"Q: {item.question_pattern} | A: {item.answer_template}" for item in qas]
         return [f"[{row.topic}] {row.content}" for row in rows] + qa_rows
 
-    def reply_with_memory(self, user_message: str) -> str:
+    def reply_with_memory(self, user_message: str, allow_greeting: bool = True) -> str:
         memory = self.context.export_memory()
         memory_blob = "\n".join([f"- {k}: {v}" for k, v in memory.items()]) or "- empty"
         knowledge_blob = "\n".join(self.get_relevant_knowledge(user_message, limit=10)) or "- empty"
@@ -113,9 +113,12 @@ class KnowledgeService:
             "Your job is to decide when to call tool-backed actions versus normal chat. "
             "Calendar/YouGile are execution backends; chat layer controls intent and wording. "
             "Never invent tool results. If data is missing, ask one concise clarifying question. "
+            "Keep dialogue continuity; do not restart conversation tone on each message. "
             "If user asks a broad question, give structured practical guidance. "
             "If user gives plans, acknowledge and suggest concrete next action."
         )
+        if not allow_greeting:
+            system_prompt += " Do not greet the user in this reply."
         user_prompt = (
             f"User message:\n{user_message}\n\n"
             f"Long-term memory:\n{memory_blob}\n\n"
