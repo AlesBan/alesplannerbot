@@ -113,6 +113,22 @@ Use Render in `frankfurt` region to run bot/API from a supported location.
    - API health: `https://<life-ai-api-domain>/health`
    - Bot logs in Render dashboard.
 
+### Optional: Faster CI-driven deploy
+
+This repository includes `.github/workflows/deploy-render.yml`:
+
+- Runs Python compile checks on every push to `main`
+- Detects changed paths
+- Triggers only the needed Render service deploy (`bot`, `api`, or both)
+
+Configure GitHub repository secrets:
+
+- `RENDER_API_KEY`
+- `RENDER_BOT_SERVICE_ID`
+- `RENDER_API_SERVICE_ID`
+
+If you want this workflow to be the only deploy trigger, switch `autoDeploy` to `false` in `render.yaml` after secrets are configured.
+
 ## Data Model Highlights
 
 - `tasks` includes `energy_cost` for energy-aware planning
