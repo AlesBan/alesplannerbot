@@ -6,7 +6,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
-from aiogram.types import Message
+from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup
 
 from app.ai.chat_assistant import ChatAssistant, ChatIntent
 from app.ai.context_engine import ContextEngine
@@ -98,17 +98,31 @@ def _is_expectation_feedback_text(text: str) -> bool:
 
 def _normalize_command_text(text: str) -> str:
     lowered = (text or "").strip().lower()
+    if lowered.startswith("/"):
+        lowered = lowered[1:]
     lowered = re.sub(r"\s+", " ", lowered)
     return lowered
 
 
 def _training_mode_command(text: str) -> str | None:
     lower = _normalize_command_text(text)
-    if lower in {"режим обучения вкл", "режим обучения on", "обучение вкл", "обучение on"}:
+    if lower in {"режим обучения вкл", "режим обучения on", "обучение вкл", "обучение on", "training_on"}:
         return "on"
-    if lower in {"режим обучения выкл", "режим обучения off", "обучение выкл", "обучение off"}:
+    if lower in {"режим обучения выкл", "режим обучения off", "обучение выкл", "обучение off", "training_off"}:
         return "off"
     return None
+
+
+def _main_menu_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Что у меня на сейчас"), KeyboardButton(text="Покажи события на сегодня")],
+            [KeyboardButton(text="Режим обучения вкл"), KeyboardButton(text="Режим обучения выкл")],
+            [KeyboardButton(text="Покажи чему ты научился"), KeyboardButton(text="Забудь последнее обучение")],
+        ],
+        resize_keyboard=True,
+        selective=True,
+    )
 
 
 def _allow_greeting_reply(text: str, ks: KnowledgeService) -> bool:
@@ -599,8 +613,22 @@ async def natural_chat_handler(message: Message) -> None:
             await message.answer(reply)
             ks.add_turn(role="assistant", content=reply, intent="training_show")
             return
+        if normalized_cmd in {"training_show"}:
+            rows = ks.list_taught_pairs(limit=8)
+            if not rows:
+                reply = "Пока нет сохраненных обучающих примеров."
+            else:
+                lines = []
+                for idx, row in enumerate(rows, start=1):
+                    q = " ".join((row.question_pattern or "").split())[:90]
+                    a = " ".join((row.answer_template or "").split())[:110]
+                    lines.append(f"{idx}) Q: {q}\n   A: {a}")
+                reply = "Вот чему я научился:\n" + "\n".join(lines)
+            await message.answer(reply)
+            ks.add_turn(role="assistant", content=reply, intent="training_show")
+            return
 
-        if normalized_cmd in {"забудь последнее обучение", "удали последнее обучение", "forget last training"}:
+        if normalized_cmd in {"забудь последнее обучение", "удали последнее обучение", "forget last training", "training_forget"}:
             forgotten = ks.forget_last_taught_pair()
             if not forgotten:
                 reply = "Нечего удалять: обучающих примеров пока нет."
@@ -640,7 +668,7 @@ async def natural_chat_handler(message: Message) -> None:
                     "capabilities": ["calendar_read_write", "yougile_sync", "task_planning", "habit_support"],
                 },
             ) or "Готов работать в формате чата и помогать с календарем, задачами и планированием."
-            await message.answer(reply)
+            await message.answer(reply, reply_markup=_main_menu_keyboard())
             ks.add_turn(role="assistant", content="Sent welcome message", intent="welcome")
             return
 
@@ -907,6 +935,37 @@ async def natural_chat_handler(message: Message) -> None:
             await message.answer(reply)
             ks.add_turn(role="assistant", content=reply, intent="current_focus")
             ks.maybe_learn_from_dialogue(text, reply)
+            return
+
+        if normalized_cmd in {"now"}:
+            gcal = GoogleCalendarService()
+            calendar_tz = gcal.get_calendar_timezone() or user.timezone or settings.timezone
+            _, events = calendar_read.list_day_events(user.id, calendar_tz, 0)
+            if not events:
+                calendar_sync.pull_incremental(user.id, provider_calendar_id)
+                _, events = calendar_read.list_day_events(user.id, calendar_tz, 0)
+            reply = _format_current_focus(events, calendar_tz)
+            await message.answer(reply)
+            ks.add_turn(role="assistant", content=reply, intent="current_focus")
+            ks.maybe_learn_from_dialogue(text, reply)
+            return
+
+        if normalized_cmd in {"today"}:
+            gcal = GoogleCalendarService()
+            calendar_tz = gcal.get_calendar_timezone() or user.timezone or settings.timezone
+            day_label = _build_local_day_label(calendar_tz)
+            _, events = calendar_read.list_day_events(user.id, calendar_tz, 0)
+            if not events:
+                calendar_sync.pull_incremental(user.id, provider_calendar_id)
+                _, events = calendar_read.list_day_events(user.id, calendar_tz, 0)
+            if events:
+                rows = _format_calendar_events(events, calendar_tz, max_items=None)
+                reply = f"События на {day_label}:\n{rows}"
+                _save_calendar_snapshot(context, events, calendar_tz, day_label)
+            else:
+                reply = f"На {day_label} событий нет."
+            await message.answer(reply)
+            ks.add_turn(role="assistant", content=reply, intent="calendar_check")
             return
 
         taught = ks.find_taught_answer(normalized_text)

@@ -3,6 +3,7 @@ import logging
 
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import BotCommand
 
 from app.bot.handlers import router as command_router
 from app.bot.voice_handler import router as voice_router
@@ -19,6 +20,20 @@ def create_dispatcher() -> Dispatcher:
     return dp
 
 
+async def _set_bot_commands(bot: Bot) -> None:
+    await bot.set_my_commands(
+        [
+            BotCommand(command="start", description="Запуск и меню"),
+            BotCommand(command="now", description="Что у меня на сейчас"),
+            BotCommand(command="today", description="Планы на сегодня"),
+            BotCommand(command="training_on", description="Включить режим обучения"),
+            BotCommand(command="training_off", description="Выключить режим обучения"),
+            BotCommand(command="training_show", description="Показать чему бот научился"),
+            BotCommand(command="training_forget", description="Забыть последнее обучение"),
+        ]
+    )
+
+
 async def run_bot() -> None:
     settings = get_settings()
     if not settings.telegram_bot_token:
@@ -31,6 +46,7 @@ async def run_bot() -> None:
         jobs = BackgroundJobs(bot)
         jobs.start()
         try:
+            await _set_bot_commands(bot)
             await dp.start_polling(bot)
             return
         except Exception:
