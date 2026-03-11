@@ -1,0 +1,21 @@
+category,expected_intent,question
+current_focus,current_focus,Что у меня на сейчас?
+current_focus,current_focus,Чем мне заняться прямо сейчас?
+current_focus,current_focus,Какой у меня текущий фокус?
+current_focus,current_focus,Сейчас я свободен или занят?
+bedtime,bedtime,Когда я должен быть в кровати?
+bedtime,bedtime,Во сколько мне ложиться сегодня?
+bedtime,bedtime,Когда по плану сон?
+today_plan,today_plan,Покажи события на сегодня
+today_plan,today_plan,Что у меня запланировано на сегодня?
+today_plan,today_plan,Дай полный список дел на сегодня
+calendar_follow_up,today_plan,Что у меня после 17:00?
+calendar_follow_up,today_plan,Что идет после ужина сегодня?
+calendar_follow_up,today_plan,На какую дату это расписание?
+connections_check,,Проверь, подключены ли календарь и YouGile
+connections_check,,Какой статус интеграций сейчас?
+calendar_add,,Добавь сегодня 20:30-21:00 Рисование
+calendar_add,,Поставь на сегодня 19:10-19:40 Чтение
+calendar_delete,,Удали событие 20:00-21:00 Регистрация
+calendar_delete,,Удали из календаря Рисование на сегодня
+general_chat,,Помоги приоритизировать мой день без перегруза

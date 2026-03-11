@@ -35,6 +35,7 @@ settings = get_settings()
 BACKLOG_PATH = Path("CHAT_IMPROVEMENT_BACKLOG.md")
 PROFILE_MATCHER = QueryProfileMatcher()
 TRAINING_QUIZ_STATE_KEY = "training_quiz_state"
+TRAINING_QUESTION_BANK_PATH = Path("training/question_bank.csv")
 
 
 def _ensure_user(db, telegram_id: int, name: str) -> User:
@@ -176,6 +177,71 @@ def _send_training_quiz_item_text(state: dict, index: int) -> str | None:
         f"Ответ бота:\n{answer}\n\n"
         "Оцени ответ кнопкой ниже."
     )
+
+
+def _apply_training_feedback(db, user_id: int) -> dict:
+    last = (
+        db.query(TrainingFeedback.session_id)
+        .filter(TrainingFeedback.user_id == user_id)
+        .order_by(TrainingFeedback.created_at.desc())
+        .first()
+    )
+    if not last:
+        return {"ok": False, "reason": "no_session"}
+    session_id = last[0]
+    rows = db.query(TrainingFeedback).filter(
+        TrainingFeedback.user_id == user_id,
+        TrainingFeedback.session_id == session_id,
+    ).all()
+    if not rows:
+        return {"ok": False, "reason": "empty_session", "session_id": session_id}
+
+    service = IntentProfileService(db)
+    before = {p["name"]: float(p["threshold"]) for p in service.list_profiles(user_id)}
+    added_count = 0
+    tuned_profiles: set[str] = set()
+    seen_pairs: set[tuple[str, str]] = set()
+
+    for row in rows:
+        if row.is_correct:
+            continue
+        expected = (row.expected_intent or "").strip().lower()
+        question = " ".join((row.question or "").strip().lower().split())
+        if not expected or len(question) < 6:
+            continue
+        pair = (expected, question)
+        if pair in seen_pairs:
+            continue
+        seen_pairs.add(pair)
+        if service.add_phrase(user_id, expected, question):
+            added_count += 1
+            tuned_profiles.add(expected)
+
+    for profile_name in tuned_profiles:
+        current = next((p for p in service.list_profiles(user_id) if p["name"] == profile_name), None)
+        if not current:
+            continue
+        current_threshold = float(current["threshold"])
+        new_threshold = max(0.35, round(current_threshold - 0.03, 2))
+        if new_threshold < current_threshold:
+            service.set_threshold(user_id, profile_name, new_threshold)
+
+    after = {p["name"]: float(p["threshold"]) for p in service.list_profiles(user_id)}
+    total = len(rows)
+    good = sum(1 for r in rows if r.is_correct)
+    bad = total - good
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "total": total,
+        "good": good,
+        "bad": bad,
+        "accuracy": round(good / max(1, total), 4),
+        "added_phrases": added_count,
+        "tuned_profiles": sorted(tuned_profiles),
+        "thresholds_before": before,
+        "thresholds_after": after,
+    }
 
 
 def _intent_add_phrase_command(text: str) -> tuple[str, str] | None:
@@ -802,7 +868,12 @@ async def natural_chat_handler(message: Message) -> None:
         if training_cmd == "on":
             ks.set_training_enabled(True)
             count = _training_on_count(text, default_count=30)
-            run = EvalHarnessService(db).generate_run(user.telegram_id, count=count)
+            questions_source = str(TRAINING_QUESTION_BANK_PATH) if TRAINING_QUESTION_BANK_PATH.exists() else None
+            run = EvalHarnessService(db).generate_run(
+                user.telegram_id,
+                count=count,
+                questions_source_path=questions_source,
+            )
             items = run.get("items") or []
             if not items:
                 reply = "Не получилось запустить тренировку: список вопросов пуст."
@@ -820,6 +891,8 @@ async def natural_chat_handler(message: Message) -> None:
                 f"Режим обучения включен. Запускаю сессию на {len(items)} вопросов.\n"
                 "После каждого ответа жми: Верно или Неверно."
             )
+            if questions_source:
+                intro += "\nИсточник вопросов: training/question_bank.csv"
             first_text = _send_training_quiz_item_text(state, 0) or "Стартуем."
             first = items[0]
             kb = _training_quiz_keyboard(state["session_id"], int(first.get("id") or 1))
@@ -943,6 +1016,26 @@ async def natural_chat_handler(message: Message) -> None:
                 reply = f"Последняя сессия {session_id[:8]}...\nИтого: {total}\nВерно: {good}\nНеверно: {bad}"
             await message.answer(reply)
             ks.add_turn(role="assistant", content=reply, intent="training_results")
+            return
+
+        if normalized_cmd in {"training_apply", "применить обучение", "примени обучение"}:
+            applied = _apply_training_feedback(db, user.id)
+            if not applied.get("ok"):
+                if applied.get("reason") == "no_session":
+                    reply = "Пока нет завершенных сессий с кнопками Верно/Неверно. Сначала запусти /training_on."
+                else:
+                    reply = "Сессию нашел, но в ней нет оценок."
+                await message.answer(reply)
+                ks.add_turn(role="assistant", content=reply, intent="training_apply_empty")
+                return
+            reply = (
+                f"Применил обучение по сессии {str(applied['session_id'])[:8]}...\n"
+                f"Вопросов: {applied['total']}, Верно: {applied['good']}, Неверно: {applied['bad']}\n"
+                f"Добавил фраз в профили: {applied['added_phrases']}\n"
+                f"Профили тюнинга: {', '.join(applied['tuned_profiles']) if applied['tuned_profiles'] else 'нет'}"
+            )
+            await message.answer(reply)
+            ks.add_turn(role="assistant", content=reply, intent="training_apply")
             return
 
         # Fast-path for latency-sensitive queries: skip LLM routing entirely.
