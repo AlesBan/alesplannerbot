@@ -1,21 +1,501 @@
-category,expected_intent,question
-current_focus,current_focus,Что у меня на сейчас?
-current_focus,current_focus,Чем мне заняться прямо сейчас?
-current_focus,current_focus,Какой у меня текущий фокус?
-current_focus,current_focus,Сейчас я свободен или занят?
-bedtime,bedtime,Когда я должен быть в кровати?
-bedtime,bedtime,Во сколько мне ложиться сегодня?
-bedtime,bedtime,Когда по плану сон?
-today_plan,today_plan,Покажи события на сегодня
+﻿category,expected_intent,question
+current_focus,current_focus,Чем мне сейчас заниматься?
+next_after_now,current_focus,Что у меня сразу после текущего события?
+done_check,,Что у меня уже сделано по плану?
+today_plan,today_plan,Дай мне мои планы на сегодняшний день.
+follow_up_after_event,today_plan,После блока 20:00-21:00 что дальше?
+date_clarification,today_plan,Это точно на сегодня?
+bedtime,bedtime,Во сколько мне сегодня ложиться?
+calendar_add,,Поставь в календарь 19:10-19:40 Английский.
+calendar_delete,,Нужно удалить Ужин + Собойка из плана.
+calendar_move,,Можно передвинуть Рисование с 21:15 на 19:00?
+connections_check,,Есть ли соединение с календарем?
+planning_help,,Как лучше расставить приоритеты на сегодня?
+habit_status,,Какие привычки требуют внимания?
+weekly_report,,Что по итогам недели?
+current_focus,current_focus,"Если сейчас 09:00, чем я должен заниматься?"
+next_after_now,current_focus,Что у меня идет после этого?
+done_check,,Есть ли сегодня выполненные задачи?
 today_plan,today_plan,Что у меня запланировано на сегодня?
-today_plan,today_plan,Дай полный список дел на сегодня
-calendar_follow_up,today_plan,Что у меня после 17:00?
-calendar_follow_up,today_plan,Что идет после ужина сегодня?
-calendar_follow_up,today_plan,На какую дату это расписание?
-connections_check,,Проверь, подключены ли календарь и YouGile
-connections_check,,Какой статус интеграций сейчас?
-calendar_add,,Добавь сегодня 20:30-21:00 Рисование
-calendar_add,,Поставь на сегодня 19:10-19:40 Чтение
-calendar_delete,,Удали событие 20:00-21:00 Регистрация
-calendar_delete,,Удали из календаря Рисование на сегодня
-general_chat,,Помоги приоритизировать мой день без перегруза
+follow_up_after_event,today_plan,После блока 21:15-21:30 что дальше?
+date_clarification,today_plan,На какую дату этот список?
+bedtime,bedtime,Когда по плану начинается сон?
+calendar_add,,Поставь мне Разбор задач сегодня на 20:30-21:00.
+calendar_delete,,Удали встречу Рисование.
+calendar_move,,Можно передвинуть Английский Listening с 18:30 на 18:30?
+connections_check,,Проверь доступ к Google Calendar.
+planning_help,,Помоги распланировать мой день без перегруза.
+habit_status,,Какие привычки у меня просрочены?
+weekly_report,,Покажи баланс работы и отдыха за неделю.
+current_focus,current_focus,Какой блок у меня идет прямо сейчас?
+next_after_now,current_focus,Какой следующий блок на сегодня?
+done_check,,Я уже выполнил задачу после 09:00?
+today_plan,today_plan,Дай полный план дня.
+follow_up_after_event,today_plan,Что идет следующим после Подготовка ко сну?
+date_clarification,today_plan,Этот план за какой день?
+bedtime,bedtime,Когда у меня время на сон сегодня?
+calendar_add,,Создай слот Рисование сегодня в 21:15-21:30.
+calendar_delete,,Удали событие Рисование.
+calendar_move,,Переставь Регистрация на позже: 16:30-17:00.
+connections_check,,Есть ли соединение с календарем?
+planning_help,,Дай план с паузами и отдыхом.
+habit_status,,Какие привычки я давно не делал?
+weekly_report,,Покажи баланс работы и отдыха за неделю.
+current_focus,current_focus,Какой у меня текущий фокус?
+next_after_now,current_focus,Что у меня сразу после текущего события?
+done_check,,Отмечено ли у меня как выполнено последнее дело?
+today_plan,today_plan,Покажи расписание на сегодня по времени.
+follow_up_after_event,today_plan,Что у меня после ужина?
+date_clarification,today_plan,За какой день ты мне это показал?
+bedtime,bedtime,Когда я должен быть в кровати?
+calendar_add,,Запиши Прогулка на 20:00-21:00 сегодня.
+calendar_delete,,Сотри событие 20:00-21:00 Подготовка ко сну.
+calendar_move,,Переставь Английский Listening на позже: 19:30-20:00.
+connections_check,,Проверь подключение YouGile.
+planning_help,,Помоги распланировать мой день без перегруза.
+habit_status,,Какие привычки у меня просрочены?
+weekly_report,,Сделай недельный срез по делам.
+current_focus,current_focus,"Если сейчас 07:40, чем я должен заниматься?"
+next_after_now,current_focus,Что дальше по календарю?
+done_check,,Есть ли сегодня выполненные задачи?
+today_plan,today_plan,Что у меня запланировано на сегодня?
+follow_up_after_event,today_plan,Что у меня после ужина?
+date_clarification,today_plan,Это планы на сегодня или завтра?
+bedtime,bedtime,Когда я должен лечь спать?
+calendar_add,,Вставь в расписание Планирование на 17:00-18:30.
+calendar_delete,,Удали встречу Рисование.
+calendar_move,,Сдвинь Регистрация на 19:30-20:00.
+connections_check,,Есть ли соединение с календарем?
+planning_help,,Нужен сбалансированный план: работа и отдых.
+habit_status,,Какие привычки я давно не делал?
+weekly_report,,Какой у меня прогресс за неделю?
+current_focus,current_focus,Какой блок у меня идет прямо сейчас?
+next_after_now,current_focus,После этого чем я должен заняться?
+done_check,,Какие дела я уже закрыл сегодня?
+today_plan,today_plan,Что у меня в календаре на сегодня?
+follow_up_after_event,today_plan,Что у меня после уроков?
+date_clarification,today_plan,Это планы на сегодня или завтра?
+bedtime,bedtime,Когда я должен быть в кровати?
+calendar_add,,Сделай событие Разбор задач с 09:00 до 10:00.
+calendar_delete,,Сними из расписания Регистрация на 20:30-21:00.
+calendar_move,,Поставь Ужин + Собойка вместо 20:00-21:00 на 16:30-17:00.
+connections_check,,Покажи статус всех подключений.
+planning_help,,Как лучше расставить приоритеты на сегодня?
+habit_status,,Сколько привычек выполнено за неделю?
+weekly_report,,Дай недельный отчет продуктивности.
+current_focus,current_focus,Что мне делать прямо сейчас?
+next_after_now,current_focus,Что идет после текущего дела?
+done_check,,Есть ли сегодня выполненные задачи?
+today_plan,today_plan,Покажи расписание на сегодня по времени.
+follow_up_after_event,today_plan,После регистрации что идет?
+date_clarification,today_plan,Этот план за какой день?
+bedtime,bedtime,Какое время отбоя у меня сегодня?
+calendar_add,,Вставь в расписание Тренировка на 20:00-21:00.
+calendar_delete,,Удали встречу Подготовка ко сну.
+calendar_move,,Поменяй время Английский Listening на 20:40-21:10.
+connections_check,,Ты сейчас видишь мой календарь?
+planning_help,,Дай план с паузами и отдыхом.
+habit_status,,Какие привычки у меня просрочены?
+weekly_report,,Какая статистика за последнюю неделю?
+current_focus,current_focus,На сейчас какое у меня дело?
+next_after_now,current_focus,Что у меня дальше по расписанию?
+done_check,,Сколько дел уже сделано сегодня?
+today_plan,today_plan,Какие у меня дела сегодня?
+follow_up_after_event,today_plan,Что у меня после ужина?
+date_clarification,today_plan,Это расписание на какое число?
+bedtime,bedtime,Когда я должен лечь спать?
+calendar_add,,Добавь сегодня 19:10-19:40 Планирование.
+calendar_delete,,Сними из расписания Подготовка ко сну на 20:30-21:00.
+calendar_move,,Можно передвинуть Рисование с 19:00 на 19:00?
+connections_check,,Статус интеграций сейчас?
+planning_help,,Как мне лучше распределить дела сегодня?
+habit_status,,Есть ли просроченные привычки сейчас?
+weekly_report,,Дай недельный отчет продуктивности.
+current_focus,current_focus,Что мне делать прямо сейчас?
+next_after_now,current_focus,Что будет после 19:00?
+done_check,,Что из сегодняшнего уже завершено?
+today_plan,today_plan,Покажи день целиком без сокращений.
+follow_up_after_event,today_plan,Что у меня после уроков?
+date_clarification,today_plan,За какой день ты мне это показал?
+bedtime,bedtime,Во сколько я должен быть уже в кровати?
+calendar_add,,Запланируй на сегодня Рисование с 11:00 до 14:00.
+calendar_delete,,Удали встречу Рисование.
+calendar_move,,Перенеси Рисование с 17:00-18:30 на 19:30-20:00.
+connections_check,,"Покажи, что подключено прямо сейчас."
+planning_help,,Сделай реалистичный план на сегодня.
+habit_status,,Какие привычки сегодня нужно закрыть?
+weekly_report,,Какой у меня прогресс за неделю?
+current_focus,current_focus,Сейчас я занят или свободен?
+next_after_now,current_focus,Что у меня дальше по расписанию?
+done_check,,Что у меня уже сделано по плану?
+today_plan,today_plan,Дай мне мои планы на сегодняшний день.
+follow_up_after_event,today_plan,Что идет следующим после Рисование?
+date_clarification,today_plan,Это планы на сегодня или завтра?
+bedtime,bedtime,Когда по плану начинается сон?
+calendar_add,,Сделай событие Тренировка с 07:40 до 18:30.
+calendar_delete,,Убери слот 19:10-19:40 Регистрация.
+calendar_move,,Поменяй время Рисование на 16:30-17:00.
+connections_check,,"Покажи, что подключено прямо сейчас."
+planning_help,,Оптимизируй мой план на сегодня.
+habit_status,,Что с привычкой тренировки?
+weekly_report,,Какой weekly report на сейчас?
+current_focus,current_focus,Что у меня в плане в этот момент?
+next_after_now,current_focus,Что будет после 20:00?
+done_check,,Отмечено ли у меня как выполнено последнее дело?
+today_plan,today_plan,Покажи расписание на сегодня по времени.
+follow_up_after_event,today_plan,А что дальше после 20:00-21:00?
+date_clarification,today_plan,Уточни дату этого расписания.
+bedtime,bedtime,Во сколько у меня блок 'В кровати'?
+calendar_add,,Запланируй на сегодня Рисование с 20:00 до 21:00.
+calendar_delete,,Удали это дело из календаря: Подготовка ко сну.
+calendar_move,,Перенеси событие Ужин + Собойка на другое время 20:40-21:10.
+connections_check,,Покажи статус всех подключений.
+planning_help,,Перепланируй день с учетом отдыха.
+habit_status,,Какие привычки я давно не делал?
+weekly_report,,Какой weekly report на сейчас?
+current_focus,current_focus,Что мне делать в 09:00?
+next_after_now,current_focus,Какой следующий блок на сегодня?
+done_check,,Какие дела я уже закрыл сегодня?
+today_plan,today_plan,Дай полный план дня.
+follow_up_after_event,today_plan,После регистрации что идет?
+date_clarification,today_plan,Это точно на сегодня?
+bedtime,bedtime,Во сколько у меня блок 'В кровати'?
+calendar_add,,Вставь в расписание Прогулка на 20:30-21:00.
+calendar_delete,,Убери слот 20:30-21:00 Английский Listening.
+calendar_move,,Переставь Ужин + Собойка на позже: 20:40-21:10.
+connections_check,,Проверь доступ к Google Calendar.
+planning_help,,Оптимизируй мой план на сегодня.
+habit_status,,Покажи статус привычек.
+weekly_report,,Покажи отчет за неделю.
+current_focus,current_focus,Какой блок у меня идет прямо сейчас?
+next_after_now,current_focus,Что дальше по календарю?
+done_check,,Что из сегодняшнего уже завершено?
+today_plan,today_plan,Какие у меня дела сегодня?
+follow_up_after_event,today_plan,Что идет после 11:00?
+date_clarification,today_plan,На какой день ты сейчас смотришь?
+bedtime,bedtime,Когда по плану начинается сон?
+calendar_add,,Поставь мне Прогулка сегодня на 20:00-21:00.
+calendar_delete,,Удали из календаря Ужин + Собойка на сегодня.
+calendar_move,,Сдвинь Ужин + Собойка на 18:00-18:30.
+connections_check,,Проверь подключение YouGile.
+planning_help,,Сделай реалистичный план на сегодня.
+habit_status,,Какие привычки сегодня нужно закрыть?
+weekly_report,,Сделай недельный срез по делам.
+current_focus,current_focus,На сейчас какое у меня дело?
+next_after_now,current_focus,Что идет после текущего дела?
+done_check,,Что из сегодняшнего уже завершено?
+today_plan,today_plan,Покажи день целиком без сокращений.
+follow_up_after_event,today_plan,Что у меня после Английский Listening?
+date_clarification,today_plan,На какую дату этот список?
+bedtime,bedtime,Во сколько у меня блок 'В кровати'?
+calendar_add,,Добавь сегодня 18:30-19:00 Разбор задач.
+calendar_delete,,Сними из расписания Рисование на 20:00-21:00.
+calendar_move,,Поменяй время Подготовка ко сну на 18:00-18:30.
+connections_check,,Статус интеграций сейчас?
+planning_help,,Дай план с паузами и отдыхом.
+habit_status,,Какие привычки сегодня нужно закрыть?
+weekly_report,,Какой у меня прогресс за неделю?
+current_focus,current_focus,"Если сейчас 19:00, чем я должен заниматься?"
+next_after_now,current_focus,Что идет после текущего дела?
+done_check,,Что у меня уже сделано по плану?
+today_plan,today_plan,Покажи расписание на сегодня по времени.
+follow_up_after_event,today_plan,А что дальше после 17:00-18:30?
+date_clarification,today_plan,На какой день ты сейчас смотришь?
+bedtime,bedtime,Когда по плану начинается сон?
+calendar_add,,Запланируй на сегодня Рисование с 11:00 до 21:00.
+calendar_delete,,Удали запись Английский Listening сегодня.
+calendar_move,,Поставь Английский Listening вместо 18:30-19:00 на 19:30-20:00.
+connections_check,,Проверь подключение YouGile.
+planning_help,,Как лучше расставить приоритеты на сегодня?
+habit_status,,Какие привычки я давно не делал?
+weekly_report,,Покажи баланс работы и отдыха за неделю.
+current_focus,current_focus,Что мне делать в 06:30?
+next_after_now,current_focus,Какой следующий блок на сегодня?
+done_check,,Есть ли сегодня выполненные задачи?
+today_plan,today_plan,Дай мне мои планы на сегодняшний день.
+follow_up_after_event,today_plan,А что дальше после 17:00-18:30?
+date_clarification,today_plan,Это планы на сегодня или завтра?
+bedtime,bedtime,Во сколько мне сегодня ложиться?
+calendar_add,,Запиши Английский на 20:30-21:00 сегодня.
+calendar_delete,,Удали событие Английский Listening.
+calendar_move,,Перенеси Ужин + Собойка с 21:15-21:30 на 19:30-20:00.
+connections_check,,Ты сейчас видишь мой календарь?
+planning_help,,Оптимизируй мой план на сегодня.
+habit_status,,Что по моим привычкам на этой неделе?
+weekly_report,,Какая статистика за последнюю неделю?
+current_focus,current_focus,Что мне делать в 21:15?
+next_after_now,current_focus,Что у меня после текущего слота?
+done_check,,Отмечено ли у меня как выполнено последнее дело?
+today_plan,today_plan,Дай мне мои планы на сегодняшний день.
+follow_up_after_event,today_plan,Что идет после 21:15?
+date_clarification,today_plan,Это точно на сегодня?
+bedtime,bedtime,Во сколько я должен быть уже в кровати?
+calendar_add,,Добавь событие Тренировка на 19:10-19:40.
+calendar_delete,,Убери событие в 21:15-21:30 с названием Английский Listening.
+calendar_move,,Перенеси Подготовка ко сну с 20:00-21:00 на 16:30-17:00.
+connections_check,,Покажи статус всех подключений.
+planning_help,,Дай план с паузами и отдыхом.
+habit_status,,Какие привычки сегодня нужно закрыть?
+weekly_report,,Покажи баланс работы и отдыха за неделю.
+current_focus,current_focus,Что у меня на сейчас?
+next_after_now,current_focus,Какой следующий блок на сегодня?
+done_check,,Покажи список завершенных дел за сегодня.
+today_plan,today_plan,Скинь список всех событий на сегодня.
+follow_up_after_event,today_plan,Что у меня после этого события?
+date_clarification,today_plan,Какая дата у этого расписания?
+bedtime,bedtime,Какое время отбоя у меня сегодня?
+calendar_add,,Сделай событие Рисование с 09:00 до 21:00.
+calendar_delete,,Удали запись Английский Listening сегодня.
+calendar_move,,Переставь Рисование на позже: 20:40-21:10.
+connections_check,,Статус интеграций сейчас?
+planning_help,,Как лучше расставить приоритеты на сегодня?
+habit_status,,Напомни мне про привычки на сегодня.
+weekly_report,,Какой у меня прогресс за неделю?
+current_focus,current_focus,"Если сейчас 14:00, чем я должен заниматься?"
+next_after_now,current_focus,Что будет после 11:00?
+done_check,,Отмечено ли у меня как выполнено последнее дело?
+today_plan,today_plan,Что сегодня по календарю?
+follow_up_after_event,today_plan,А что дальше после 18:30-19:00?
+date_clarification,today_plan,Уточни дату этого расписания.
+bedtime,bedtime,Какое время отбоя у меня сегодня?
+calendar_add,,Поставь в календарь 17:00-18:30 Чтение.
+calendar_delete,,Удали запись Подготовка ко сну сегодня.
+calendar_move,,Поменяй время Регистрация на 16:30-17:00.
+connections_check,,Покажи статус всех подключений.
+planning_help,,Перепланируй день с учетом отдыха.
+habit_status,,Сколько привычек выполнено за неделю?
+weekly_report,,Покажи баланс работы и отдыха за неделю.
+current_focus,current_focus,"Если сейчас 17:00, чем я должен заниматься?"
+next_after_now,current_focus,Какое следующее дело после текущего?
+done_check,,Покажи список завершенных дел за сегодня.
+today_plan,today_plan,Дай мне мои планы на сегодняшний день.
+follow_up_after_event,today_plan,Что по плану после 18:30 сегодня?
+date_clarification,today_plan,Этот план за какой день?
+bedtime,bedtime,Во сколько я должен быть уже в кровати?
+calendar_add,,Добавь в мой календарь Планирование 18:30-19:00.
+calendar_delete,,Удали встречу Английский Listening.
+calendar_move,,Сдвинь Рисование на 21:00-21:30.
+connections_check,,Ты сейчас видишь мой календарь?
+planning_help,,Как мне лучше распределить дела сегодня?
+habit_status,,Какие привычки требуют внимания?
+weekly_report,,Какой weekly report на сейчас?
+current_focus,current_focus,Какой у меня текущий фокус?
+next_after_now,current_focus,Что у меня после текущего слота?
+done_check,,Сколько дел уже сделано сегодня?
+today_plan,today_plan,Покажи расписание на сегодня по времени.
+follow_up_after_event,today_plan,Что идет следующим после Подготовка ко сну?
+date_clarification,today_plan,Это точно на сегодня?
+bedtime,bedtime,Когда я должен лечь спать?
+calendar_add,,Создай слот Рисование сегодня в 21:15-21:30.
+calendar_delete,,Убери событие в 20:00-21:00 с названием Английский Listening.
+calendar_move,,Сдвинь блок Подготовка ко сну на 18:30.
+connections_check,,Покажи статус всех подключений.
+planning_help,,Оптимизируй мой план на сегодня.
+habit_status,,Какие привычки сегодня нужно закрыть?
+weekly_report,,Что по итогам недели?
+current_focus,current_focus,Какой блок у меня идет прямо сейчас?
+next_after_now,current_focus,После этого чем я должен заняться?
+done_check,,Какие дела я уже закрыл сегодня?
+today_plan,today_plan,Скинь список всех событий на сегодня.
+follow_up_after_event,today_plan,Что у меня после ужина?
+date_clarification,today_plan,Уточни дату этого расписания.
+bedtime,bedtime,Во сколько мне сегодня ложиться?
+calendar_add,,Поставь в календарь 18:30-19:00 Английский.
+calendar_delete,,Убери слот 19:10-19:40 Подготовка ко сну.
+calendar_move,,Перенеси мою активность Рисование на 21:00-21:30.
+connections_check,,Интеграции в норме?
+planning_help,,Перепланируй день с учетом отдыха.
+habit_status,,Покажи статус привычек.
+weekly_report,,Сколько задач выполнено за неделю?
+current_focus,current_focus,Сейчас я занят или свободен?
+next_after_now,current_focus,Что у меня идет после этого?
+done_check,,Я уже сделал это дело?
+today_plan,today_plan,Дай мне мои планы на сегодняшний день.
+follow_up_after_event,today_plan,После регистрации что идет?
+date_clarification,today_plan,Это расписание на какое число?
+bedtime,bedtime,Когда у меня время на сон сегодня?
+calendar_add,,Поставь в календарь 18:30-19:00 Рисование.
+calendar_delete,,Удали из календаря Ужин + Собойка на сегодня.
+calendar_move,,Перенеси Ужин + Собойка с 18:30-19:00 на 21:00-21:30.
+connections_check,,Ты сейчас видишь мой календарь?
+planning_help,,Сделай реалистичный план на сегодня.
+habit_status,,Сколько привычек выполнено за неделю?
+weekly_report,,Покажи отчет за неделю.
+current_focus,current_focus,Какой у меня текущий фокус?
+next_after_now,current_focus,Какое следующее дело после текущего?
+done_check,,Есть ли сегодня выполненные задачи?
+today_plan,today_plan,Что у меня в календаре на сегодня?
+follow_up_after_event,today_plan,А что дальше после 20:30-21:00?
+date_clarification,today_plan,Это планы на сегодня или завтра?
+bedtime,bedtime,Когда планируетcя 'В кровати'?
+calendar_add,,Сделай событие Английский с 18:30 до 20:00.
+calendar_delete,,Удали встречу Английский Listening.
+calendar_move,,Перенеси Рисование с 20:30-21:00 на 20:40-21:10.
+connections_check,,"Покажи, что подключено прямо сейчас."
+planning_help,,Составь адекватный график на день.
+habit_status,,Напомни мне про привычки на сегодня.
+weekly_report,,Сколько задач выполнено за неделю?
+current_focus,current_focus,Чем мне сейчас заниматься?
+next_after_now,current_focus,Какое следующее дело после текущего?
+done_check,,Покажи список завершенных дел за сегодня.
+today_plan,today_plan,Покажи события на сегодня.
+follow_up_after_event,today_plan,Что по плану после 07:40 сегодня?
+date_clarification,today_plan,Это про сегодняшний календарь?
+bedtime,bedtime,Когда планируетcя 'В кровати'?
+calendar_add,,Добавь в мой календарь Рисование 17:00-18:30.
+calendar_delete,,Удали встречу Регистрация.
+calendar_move,,Перенеси событие Английский Listening на другое время 21:00-21:30.
+connections_check,,"Покажи, что подключено прямо сейчас."
+planning_help,,Нужен сбалансированный план: работа и отдых.
+habit_status,,Сколько привычек выполнено за неделю?
+weekly_report,,Покажи сводку: открытые и закрытые задачи.
+current_focus,current_focus,"Если сейчас 11:00, чем я должен заниматься?"
+next_after_now,current_focus,Что у меня дальше по расписанию?
+done_check,,Покажи список завершенных дел за сегодня.
+today_plan,today_plan,Дай полный план дня.
+follow_up_after_event,today_plan,Что у меня после этого события?
+date_clarification,today_plan,Это про сегодняшний календарь?
+bedtime,bedtime,Во сколько мне сегодня ложиться?
+calendar_add,,Поставь в календарь 18:30-19:00 Чтение.
+calendar_delete,,Убери слот 17:00-18:30 Ужин + Собойка.
+calendar_move,,Можно передвинуть Ужин + Собойка с 14:00 на 11:00?
+connections_check,,Покажи статус всех подключений.
+planning_help,,Нужен сбалансированный план: работа и отдых.
+habit_status,,Какие привычки требуют внимания?
+weekly_report,,Сколько задач выполнено за неделю?
+current_focus,current_focus,Что мне делать прямо сейчас?
+next_after_now,current_focus,Что дальше по календарю?
+done_check,,Что из сегодняшнего уже завершено?
+today_plan,today_plan,Покажи расписание на сегодня по времени.
+follow_up_after_event,today_plan,Что у меня после этого события?
+date_clarification,today_plan,Это точно на сегодня?
+bedtime,bedtime,Во сколько стартует сон по календарю?
+calendar_add,,Добавь в мой календарь Планирование 19:10-19:40.
+calendar_delete,,Удали это дело из календаря: Подготовка ко сну.
+calendar_move,,Поставь Регистрация вместо 19:10-19:40 на 16:30-17:00.
+connections_check,,Проверь подключение YouGile.
+planning_help,,Перепланируй день с учетом отдыха.
+habit_status,,Что по моим привычкам на этой неделе?
+weekly_report,,Сколько задач выполнено за неделю?
+current_focus,current_focus,Что у меня в плане в этот момент?
+next_after_now,current_focus,Что у меня идет после этого?
+done_check,,Какие дела я уже закрыл сегодня?
+today_plan,today_plan,Что у меня в календаре на сегодня?
+follow_up_after_event,today_plan,После регистрации что идет?
+date_clarification,today_plan,На какой день ты сейчас смотришь?
+bedtime,bedtime,Когда по плану начинается сон?
+calendar_add,,Запланируй на сегодня Английский с 18:30 до 21:00.
+calendar_delete,,Убери слот 21:15-21:30 Рисование.
+calendar_move,,Сдвинь блок Регистрация на 17:00.
+connections_check,,Проверь доступ к Google Calendar.
+planning_help,,Помоги не перегореть и закрыть дела.
+habit_status,,Что по моим привычкам на этой неделе?
+weekly_report,,Что по итогам недели?
+current_focus,current_focus,"Если сейчас 18:30, чем я должен заниматься?"
+next_after_now,current_focus,Что у меня дальше по расписанию?
+done_check,,Что из сегодняшнего уже завершено?
+today_plan,today_plan,Что у меня в календаре на сегодня?
+follow_up_after_event,today_plan,Что у меня после уроков?
+date_clarification,today_plan,За какой день ты мне это показал?
+bedtime,bedtime,Во сколько мне сегодня ложиться?
+calendar_add,,Запланируй на сегодня Планирование с 21:15 до 21:00.
+calendar_delete,,Нужно удалить Подготовка ко сну из плана.
+calendar_move,,Можно передвинуть Регистрация с 21:15 на 11:00?
+connections_check,,Статус интеграций сейчас?
+planning_help,,Дай план с паузами и отдыхом.
+habit_status,,Есть ли просроченные привычки сейчас?
+weekly_report,,Покажи отчет за неделю.
+current_focus,current_focus,Какой блок у меня идет прямо сейчас?
+next_after_now,current_focus,Что будет после 11:00?
+done_check,,Есть ли сегодня выполненные задачи?
+today_plan,today_plan,Что у меня запланировано на сегодня?
+follow_up_after_event,today_plan,Что у меня после этого события?
+date_clarification,today_plan,На какую дату этот список?
+bedtime,bedtime,Когда я должен лечь спать?
+calendar_add,,Вставь в расписание Разбор задач на 20:30-21:00.
+calendar_delete,,Убери слот 17:00-18:30 Регистрация.
+calendar_move,,Сдвинь Ужин + Собойка на 20:40-21:10.
+connections_check,,Ты сейчас видишь мой календарь?
+planning_help,,Помоги распланировать мой день без перегруза.
+habit_status,,Какие привычки я давно не делал?
+weekly_report,,Покажи баланс работы и отдыха за неделю.
+current_focus,current_focus,Что у меня в плане в этот момент?
+next_after_now,current_focus,Что идет после текущего дела?
+done_check,,Есть ли сегодня выполненные задачи?
+today_plan,today_plan,Скинь список всех событий на сегодня.
+follow_up_after_event,today_plan,Что у меня после ужина?
+date_clarification,today_plan,На какую дату этот список?
+bedtime,bedtime,Когда у меня время на сон сегодня?
+calendar_add,,Добавь сегодня 20:00-21:00 Планирование.
+calendar_delete,,Убери событие в 19:10-19:40 с названием Регистрация.
+calendar_move,,Перенеси Рисование с 18:30-19:00 на 20:40-21:10.
+connections_check,,Статус интеграций сейчас?
+planning_help,,Как лучше расставить приоритеты на сегодня?
+habit_status,,Сколько привычек выполнено за неделю?
+weekly_report,,Сколько задач выполнено за неделю?
+current_focus,current_focus,Что мне делать прямо сейчас?
+next_after_now,current_focus,Что у меня сразу после текущего события?
+done_check,,Сколько дел уже сделано сегодня?
+today_plan,today_plan,Какие у меня дела сегодня?
+follow_up_after_event,today_plan,А что дальше после 18:30-19:00?
+date_clarification,today_plan,Это расписание на какое число?
+bedtime,bedtime,Когда у меня время на сон сегодня?
+calendar_add,,Сделай событие Тренировка с 06:30 до 08:00.
+calendar_delete,,Убери событие в 17:00-18:30 с названием Рисование.
+calendar_move,,Перенеси мою активность Регистрация на 18:00-18:30.
+connections_check,,Календарь/YouGile/AI работают?
+planning_help,,Сделай реалистичный план на сегодня.
+habit_status,,Какие привычки сегодня нужно закрыть?
+weekly_report,,Дай недельный отчет продуктивности.
+current_focus,current_focus,Сейчас я занят или свободен?
+next_after_now,current_focus,Что у меня дальше по расписанию?
+done_check,,"Покажи, что уже выполнено сегодня."
+today_plan,today_plan,Дай мне мои планы на сегодняшний день.
+follow_up_after_event,today_plan,Что по плану после 20:00 сегодня?
+date_clarification,today_plan,На какую дату этот список?
+bedtime,bedtime,Во сколько стартует сон по календарю?
+calendar_add,,Добавь в мой календарь Чтение 21:15-21:30.
+calendar_delete,,Убери слот 20:30-21:00 Рисование.
+calendar_move,,Перенеси событие Регистрация на другое время 16:30-17:00.
+connections_check,,Ты сейчас видишь мой календарь?
+planning_help,,Дай план с паузами и отдыхом.
+habit_status,,Какие привычки требуют внимания?
+weekly_report,,Дай недельный отчет продуктивности.
+current_focus,current_focus,Какой у меня текущий фокус?
+next_after_now,current_focus,Что у меня дальше по расписанию?
+done_check,,Я уже выполнил задачу после 21:15?
+today_plan,today_plan,Покажи день целиком без сокращений.
+follow_up_after_event,today_plan,Что у меня после Регистрация?
+date_clarification,today_plan,Уточни дату этого расписания.
+bedtime,bedtime,Когда по плану начинается сон?
+calendar_add,,Добавь в мой календарь Разбор задач 19:10-19:40.
+calendar_delete,,Сними из расписания Рисование на 19:10-19:40.
+calendar_move,,Поменяй время Английский Listening на 20:40-21:10.
+connections_check,,Календарь/YouGile/AI работают?
+planning_help,,Составь адекватный график на день.
+habit_status,,Что с привычкой тренировки?
+weekly_report,,Покажи сводку: открытые и закрытые задачи.
+current_focus,current_focus,Чем мне сейчас заниматься?
+next_after_now,current_focus,После этого чем я должен заняться?
+done_check,,Какие дела я уже закрыл сегодня?
+today_plan,today_plan,Что у меня запланировано на сегодня?
+follow_up_after_event,today_plan,После регистрации что идет?
+date_clarification,today_plan,Этот план за какой день?
+bedtime,bedtime,Какое время отбоя у меня сегодня?
+calendar_add,,Поставь в календарь 18:30-19:00 Прогулка.
+calendar_delete,,Удали событие Подготовка ко сну.
+calendar_move,,Сдвинь Подготовка ко сну на 21:00-21:30.
+connections_check,,Статус интеграций сейчас?
+planning_help,,Дай план с паузами и отдыхом.
+habit_status,,Есть ли просроченные привычки сейчас?
+weekly_report,,Какой у меня прогресс за неделю?
+current_focus,current_focus,Что у меня на сейчас?
+next_after_now,current_focus,После этого чем я должен заняться?
+done_check,,Покажи список завершенных дел за сегодня.
+today_plan,today_plan,Какие у меня дела сегодня?
+follow_up_after_event,today_plan,После блока 21:15-21:30 что дальше?
+date_clarification,today_plan,Этот план за какой день?
+bedtime,bedtime,Какое время отбоя у меня сегодня?
+calendar_add,,Поставь в календарь 19:10-19:40 Прогулка.
+calendar_delete,,Сними из расписания Ужин + Собойка на 18:30-19:00.
+calendar_move,,Перенеси Регистрация на завтра в 16:30-17:00.
