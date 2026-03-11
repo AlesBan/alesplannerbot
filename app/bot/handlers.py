@@ -91,6 +91,26 @@ def _is_greeting_text(text: str) -> bool:
     return clean in {"привет", "здравствуй", "здравствуйте", "hello", "hi", "hey"}
 
 
+def _is_expectation_feedback_text(text: str) -> bool:
+    lower = (text or "").strip().lower()
+    return lower.startswith("я ожидал") or lower.startswith("я ожидала") or lower.startswith("а я ожидал") or lower.startswith("i expected")
+
+
+def _normalize_command_text(text: str) -> str:
+    lowered = (text or "").strip().lower()
+    lowered = re.sub(r"\s+", " ", lowered)
+    return lowered
+
+
+def _training_mode_command(text: str) -> str | None:
+    lower = _normalize_command_text(text)
+    if lower in {"режим обучения вкл", "режим обучения on", "обучение вкл", "обучение on"}:
+        return "on"
+    if lower in {"режим обучения выкл", "режим обучения off", "обучение выкл", "обучение off"}:
+        return "off"
+    return None
+
+
 def _allow_greeting_reply(text: str, ks: KnowledgeService) -> bool:
     if not _is_greeting_text(text):
         return False
@@ -145,6 +165,93 @@ def _format_calendar_events(events: list, timezone_name: str, max_items: int | N
             time_part = f"{local_start.strftime('%H:%M')}–{local_end.strftime('%H:%M')}"
         lines.append(f"- {time_part}  {title}")
     return "\n".join(lines)
+
+
+def _looks_like_current_focus_query(text: str) -> bool:
+    lower = (text or "").lower()
+    patterns = [
+        "на сейчас",
+        "прямо сейчас",
+        "сейчас",
+        "что делать сейчас",
+        "чем я должен сейчас",
+        "what now",
+        "right now",
+    ]
+    return any(p in lower for p in patterns)
+
+
+def _format_current_focus(events: list, timezone_name: str) -> str:
+    if not events:
+        return "Сейчас активного дела в календаре нет."
+    try:
+        tz = ZoneInfo(timezone_name)
+    except Exception:
+        tz = ZoneInfo("UTC")
+    now_local = datetime.now(tz)
+    normalized: list[dict] = []
+    for event in events:
+        start = getattr(event, "start_at", None) or getattr(event, "start_time", None)
+        end = getattr(event, "end_at", None) or getattr(event, "end_time", None)
+        if not start or not end:
+            continue
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=ZoneInfo("UTC"))
+        if end.tzinfo is None:
+            end = end.replace(tzinfo=ZoneInfo("UTC"))
+        local_start = start.astimezone(tz)
+        local_end = end.astimezone(tz)
+        normalized.append(
+            {
+                "title": (getattr(event, "title", None) or "Без названия").strip() or "Без названия",
+                "start": local_start,
+                "end": local_end,
+                "is_all_day": bool(getattr(event, "is_all_day", False)),
+            }
+        )
+    if not normalized:
+        return "Сейчас активного дела в календаре нет."
+    normalized.sort(key=lambda x: x["start"])
+
+    current = None
+    next_event = None
+    for row in normalized:
+        if row["is_all_day"]:
+            # All-day event is considered current for context, but timed event has priority.
+            if current is None:
+                current = row
+            continue
+        if row["start"] <= now_local < row["end"] or (row["start"] == row["end"] and abs((now_local - row["start"]).total_seconds()) < 600):
+            current = row
+            break
+        if row["start"] > now_local and next_event is None:
+            next_event = row
+
+    if not current:
+        # If no current timed event, keep closest upcoming.
+        for row in normalized:
+            if row["start"] > now_local:
+                next_event = row
+                break
+        if next_event:
+            return f"Сейчас свободно. Следующее: {next_event['start'].strftime('%H:%M')}–{next_event['end'].strftime('%H:%M')} {next_event['title']}."
+        return "Сейчас по календарю активного дела нет."
+
+    if current["is_all_day"]:
+        if next_event:
+            return f"Сейчас: {current['title']} (весь день). Ближайшее по времени: {next_event['start'].strftime('%H:%M')}–{next_event['end'].strftime('%H:%M')} {next_event['title']}."
+        return f"Сейчас: {current['title']} (весь день)."
+
+    for row in normalized:
+        if row["start"] >= current["end"]:
+            next_event = row
+            break
+    if next_event:
+        return (
+            f"Сейчас: {current['start'].strftime('%H:%M')}–{current['end'].strftime('%H:%M')} {current['title']}. "
+            f"Дальше: {next_event['start'].strftime('%H:%M')}–{next_event['end'].strftime('%H:%M')} {next_event['title']}."
+        )
+    return f"Сейчас: {current['start'].strftime('%H:%M')}–{current['end'].strftime('%H:%M')} {current['title']}."
 
 
 def _build_user_day_window_utc(timezone_name: str, day_offset: int = 0) -> tuple[datetime, datetime]:
@@ -463,13 +570,66 @@ async def natural_chat_handler(message: Message) -> None:
         ks.add_turn(role="user", content=text, intent="incoming")
         ks.learn_from_message(text)
 
+        training_cmd = _training_mode_command(text)
+        if training_cmd == "on":
+            ks.set_training_enabled(True)
+            reply = "Ок, режим обучения включен. Пиши: 'я ожидал: ...' — и я буду запоминать корректный формат."
+            await message.answer(reply)
+            ks.add_turn(role="assistant", content=reply, intent="training_mode_on")
+            return
+        if training_cmd == "off":
+            ks.set_training_enabled(False)
+            reply = "Ок, режим обучения выключен. Новые обучающие правки больше не сохраняю."
+            await message.answer(reply)
+            ks.add_turn(role="assistant", content=reply, intent="training_mode_off")
+            return
+
+        normalized_cmd = _normalize_command_text(text)
+        if normalized_cmd in {"покажи чему ты научился", "чему ты научился", "покажи обучение"}:
+            rows = ks.list_taught_pairs(limit=8)
+            if not rows:
+                reply = "Пока нет сохраненных обучающих примеров."
+            else:
+                lines = []
+                for idx, row in enumerate(rows, start=1):
+                    q = " ".join((row.question_pattern or "").split())[:90]
+                    a = " ".join((row.answer_template or "").split())[:110]
+                    lines.append(f"{idx}) Q: {q}\n   A: {a}")
+                reply = "Вот чему я научился:\n" + "\n".join(lines)
+            await message.answer(reply)
+            ks.add_turn(role="assistant", content=reply, intent="training_show")
+            return
+
+        if normalized_cmd in {"забудь последнее обучение", "удали последнее обучение", "forget last training"}:
+            forgotten = ks.forget_last_taught_pair()
+            if not forgotten:
+                reply = "Нечего удалять: обучающих примеров пока нет."
+            else:
+                q = " ".join((forgotten.question_pattern or "").split())[:100]
+                reply = f"Удалил последнее обучение для вопроса: {q}"
+            await message.answer(reply)
+            ks.add_turn(role="assistant", content=reply, intent="training_forget_last")
+            return
+
+        if _is_expectation_feedback_text(text):
+            learned = ks.register_expectation_feedback(text)
+            if learned.get("ok"):
+                reply = "Принял. Запомнил этот формат ответа и буду использовать его в похожих вопросах."
+            elif learned.get("reason") == "training_disabled":
+                reply = "Сейчас режим обучения выключен. Включи: 'режим обучения вкл'."
+            else:
+                reply = "Принял. Чтобы обучить точно, напиши: 'я ожидал: <как нужно отвечать>'."
+            await message.answer(reply)
+            ks.add_turn(role="assistant", content=reply, intent="teacher_feedback")
+            return
+
         route = chat_assistant.route_message(text)
         intent = route["intent"]
         normalized_text = route["normalized_text"]
         response_mode = route["response_mode"]
         params = route.get("params") if isinstance(route.get("params"), dict) else {}
 
-        if text.lower() == "/start" or intent == ChatIntent.welcome:
+        if text.lower() == "/start":
             ContextEngine(db, user.id).set_memory("weekly_work_hours", "0")
             ContextEngine(db, user.id).set_memory("weekly_rest_hours", "0")
             reply = ks.reply_with_backend_result(
@@ -736,8 +896,24 @@ async def natural_chat_handler(message: Message) -> None:
             ks.add_turn(role="assistant", content=reply, intent="calendar_check")
             return
 
-        allow_greeting = _allow_greeting_reply(normalized_text, ks)
-        reply = ks.reply_with_memory(normalized_text, allow_greeting=allow_greeting)
+        if intent == ChatIntent.current_focus or _looks_like_current_focus_query(normalized_text):
+            gcal = GoogleCalendarService()
+            calendar_tz = gcal.get_calendar_timezone() or user.timezone or settings.timezone
+            _, events = calendar_read.list_day_events(user.id, calendar_tz, 0)
+            if not events:
+                calendar_sync.pull_incremental(user.id, provider_calendar_id)
+                _, events = calendar_read.list_day_events(user.id, calendar_tz, 0)
+            reply = _format_current_focus(events, calendar_tz)
+            await message.answer(reply)
+            ks.add_turn(role="assistant", content=reply, intent="current_focus")
+            ks.maybe_learn_from_dialogue(text, reply)
+            return
+
+        taught = ks.find_taught_answer(normalized_text)
+        if taught:
+            reply = taught
+        else:
+            reply = ks.reply_with_memory(normalized_text, allow_greeting=False)
         if not reply:
             reply = "Понял. Если хочешь, напиши задачи на сегодня/завтра, и я сразу их распланирую."
         await message.answer(reply)
