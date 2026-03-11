@@ -1,5 +1,7 @@
 .git
 .gitignore
+.github/
+.cursor/
 .venv
 __pycache__
 *.pyc
@@ -7,5 +9,7 @@ __pycache__
 *.pyd
 .env
 life_assistant.db
+*.db
 credentials/
 agent-transcripts/
+*.md
