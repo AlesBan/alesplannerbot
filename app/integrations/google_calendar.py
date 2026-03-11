@@ -63,6 +63,45 @@ class GoogleCalendarService:
         except Exception:
             return self.settings.timezone
 
+    def list_events_raw(
+        self,
+        calendar_id: str,
+        sync_token: str | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        single_events: bool = False,
+        order_by: str = "updated",
+    ) -> tuple[list[dict], str | None]:
+        service = self._client()
+        kwargs: dict = {
+            "calendarId": calendar_id,
+            "showDeleted": True,
+            "maxResults": 2500,
+        }
+        if sync_token:
+            kwargs["syncToken"] = sync_token
+        else:
+            kwargs["singleEvents"] = single_events
+            kwargs["orderBy"] = order_by
+            if start:
+                kwargs["timeMin"] = start.astimezone(timezone.utc).isoformat()
+            if end:
+                kwargs["timeMax"] = end.astimezone(timezone.utc).isoformat()
+        items: list[dict] = []
+        next_page_token: str | None = None
+        next_sync_token: str | None = None
+        while True:
+            call_kwargs = dict(kwargs)
+            if next_page_token:
+                call_kwargs["pageToken"] = next_page_token
+            result = service.events().list(**call_kwargs).execute()
+            items.extend(result.get("items", []))
+            next_page_token = result.get("nextPageToken")
+            next_sync_token = result.get("nextSyncToken") or next_sync_token
+            if not next_page_token:
+                break
+        return items, next_sync_token
+
     def list_events(self, user_id: int, start: datetime, end: datetime) -> list[Event]:
         try:
             service = self._client()
@@ -104,6 +143,14 @@ class GoogleCalendarService:
             )
         return events
 
+    def add_event_raw(self, calendar_id: str, body: dict) -> dict:
+        service = self._client()
+        return service.events().insert(calendarId=calendar_id, body=body).execute()
+
+    def update_event_raw(self, calendar_id: str, event_id: str, body: dict) -> dict:
+        service = self._client()
+        return service.events().update(calendarId=calendar_id, eventId=event_id, body=body).execute()
+
     def add_event(self, user_id: int, title: str, start: datetime, end: datetime) -> dict:
         _ = user_id
         service = self._client()
@@ -112,7 +159,7 @@ class GoogleCalendarService:
             "start": {"dateTime": start.astimezone(timezone.utc).isoformat(), "timeZone": "UTC"},
             "end": {"dateTime": end.astimezone(timezone.utc).isoformat(), "timeZone": "UTC"},
         }
-        created = service.events().insert(calendarId=self.settings.google_calendar_id, body=body).execute()
+        created = self.add_event_raw(self.settings.google_calendar_id, body)
         return {"id": created.get("id"), "title": title, "start": start.isoformat(), "end": end.isoformat()}
 
     def move_event(self, event_id: str, new_start: datetime, new_end: datetime) -> dict:
@@ -120,13 +167,13 @@ class GoogleCalendarService:
         event = service.events().get(calendarId=self.settings.google_calendar_id, eventId=event_id).execute()
         event["start"] = {"dateTime": new_start.astimezone(timezone.utc).isoformat(), "timeZone": "UTC"}
         event["end"] = {"dateTime": new_end.astimezone(timezone.utc).isoformat(), "timeZone": "UTC"}
-        updated = service.events().update(calendarId=self.settings.google_calendar_id, eventId=event_id, body=event).execute()
+        updated = self.update_event_raw(self.settings.google_calendar_id, event_id, event)
         return {"id": updated.get("id"), "new_start": new_start.isoformat(), "new_end": new_end.isoformat()}
 
-    def delete_event(self, event_id: str) -> bool:
+    def delete_event(self, event_id: str, calendar_id: str | None = None) -> bool:
         try:
             service = self._client()
-            service.events().delete(calendarId=self.settings.google_calendar_id, eventId=event_id).execute()
+            service.events().delete(calendarId=calendar_id or self.settings.google_calendar_id, eventId=event_id).execute()
             return True
         except Exception:
             return False

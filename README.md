@@ -135,6 +135,24 @@ Configure GitHub repository secrets:
 
 If you want this workflow to be the only deploy trigger, switch `autoDeploy` to `false` in `render.yaml` after secrets are configured.
 
+### Prebuilt Images (GHCR)
+
+This repository includes `.github/workflows/build-ghcr-images.yml`:
+
+- Builds `linux/amd64` images for bot and API
+- Pushes to GHCR:
+  - `ghcr.io/<owner>/life-ai-bot:latest` and `:<commit_sha>`
+  - `ghcr.io/<owner>/life-ai-api:latest` and `:<commit_sha>`
+- Uses Buildx cache to speed up subsequent builds
+
+For image-backed Render deploys, `.github/workflows/deploy-render-ghcr.yml` triggers Render deploy hooks with `imgURL` after GHCR build succeeds.
+Required GitHub secrets:
+
+- `RENDER_BOT_DEPLOY_HOOK`
+- `RENDER_API_DEPLOY_HOOK`
+
+`render.yaml` is configured for image-backed services (`runtime: image`) and references GHCR images.
+
 ## Data Model Highlights
 
 - `tasks` includes `energy_cost` for energy-aware planning

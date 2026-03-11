@@ -1,0 +1,57 @@
+name: Deploy Render From GHCR
+
+on:
+  workflow_run:
+    workflows: ["Build And Push GHCR Images"]
+    types: [completed]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-render-ghcr-main
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    env:
+      RENDER_BOT_DEPLOY_HOOK: ${{ secrets.RENDER_BOT_DEPLOY_HOOK }}
+      RENDER_API_DEPLOY_HOOK: ${{ secrets.RENDER_API_DEPLOY_HOOK }}
+      GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+    steps:
+      - name: Validate required secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${RENDER_BOT_DEPLOY_HOOK:-}" ] || [ -z "${RENDER_API_DEPLOY_HOOK:-}" ]; then
+            echo "Missing deploy hook secrets. Set RENDER_BOT_DEPLOY_HOOK and RENDER_API_DEPLOY_HOOK."
+            exit 1
+          fi
+
+      - name: Trigger bot deploy from GHCR latest
+        shell: bash
+        run: |
+          set -euo pipefail
+          owner_lc="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          bot_img="ghcr.io/${owner_lc}/life-ai-bot:latest"
+          encoded_img="$(python -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$bot_img")"
+          separator="?"
+          if [[ "${RENDER_BOT_DEPLOY_HOOK}" == *\?* ]]; then
+            separator="&"
+          fi
+          curl --fail --silent --show-error \
+            -X POST "${RENDER_BOT_DEPLOY_HOOK}${separator}imgURL=${encoded_img}"
+
+      - name: Trigger api deploy from GHCR latest
+        shell: bash
+        run: |
+          set -euo pipefail
+          owner_lc="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          api_img="ghcr.io/${owner_lc}/life-ai-api:latest"
+          encoded_img="$(python -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$api_img")"
+          separator="?"
+          if [[ "${RENDER_API_DEPLOY_HOOK}" == *\?* ]]; then
+            separator="&"
+          fi
+          curl --fail --silent --show-error \
+            -X POST "${RENDER_API_DEPLOY_HOOK}${separator}imgURL=${encoded_img}"

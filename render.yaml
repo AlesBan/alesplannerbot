@@ -1,11 +1,11 @@
 services:
   - type: worker
     name: life-ai-bot
-    runtime: docker
+    runtime: image
     region: frankfurt
     plan: starter
-    dockerContext: .
-    dockerfilePath: ./Dockerfile.bot
+    image:
+      url: ghcr.io/alesban/life-ai-bot:latest
     dockerCommand: python main.py
     autoDeploy: false
     envVars:
@@ -54,11 +54,11 @@ services:
 
   - type: web
     name: life-ai-api
-    runtime: docker
+    runtime: image
     region: frankfurt
     plan: starter
-    dockerContext: .
-    dockerfilePath: ./Dockerfile.api
+    image:
+      url: ghcr.io/alesban/life-ai-api:latest
     dockerCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     autoDeploy: false
     healthCheckPath: /health

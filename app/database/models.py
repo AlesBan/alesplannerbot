@@ -1,7 +1,7 @@
 from datetime import datetime
 from enum import Enum
 
-from sqlalchemy import DateTime, Enum as SqlEnum, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Enum as SqlEnum, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.db import Base
@@ -30,6 +30,40 @@ class EnergyCost(str, Enum):
     high = "high"
 
 
+class CalendarProvider(str, Enum):
+    google = "google"
+
+
+class CalendarEventStatus(str, Enum):
+    confirmed = "confirmed"
+    tentative = "tentative"
+    cancelled = "cancelled"
+
+
+class CalendarVisibility(str, Enum):
+    default = "default"
+    public = "public"
+    private = "private"
+    confidential = "confidential"
+
+
+class CalendarTransparency(str, Enum):
+    opaque = "opaque"
+    transparent = "transparent"
+
+
+class CalendarSyncState(str, Enum):
+    synced = "synced"
+    pending_push = "pending_push"
+    pending_delete = "pending_delete"
+    push_failed = "push_failed"
+
+
+class CalendarOutboxOp(str, Enum):
+    upsert = "upsert"
+    delete = "delete"
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -47,6 +81,11 @@ class User(Base):
     knowledge_items: Mapped[list["KnowledgeItem"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     conversation_turns: Mapped[list["ConversationTurn"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     learned_qas: Mapped[list["LearnedQA"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    calendar_accounts: Mapped[list["CalendarAccount"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    calendar_sync_states: Mapped[list["CalendarSyncStateModel"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    calendar_events: Mapped[list["CalendarEvent"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    calendar_categories: Mapped[list["CalendarCategory"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    calendar_outbox_items: Mapped[list["CalendarOutbox"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
 
 class Task(Base):
@@ -171,3 +210,132 @@ class LearnedQA(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     user: Mapped["User"] = relationship(back_populates="learned_qas")
+
+
+class CalendarAccount(Base):
+    __tablename__ = "calendar_accounts"
+    __table_args__ = (UniqueConstraint("user_id", "provider", name="uq_calendar_account_user_provider"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    provider: Mapped[CalendarProvider] = mapped_column(SqlEnum(CalendarProvider), default=CalendarProvider.google)
+    provider_calendar_id: Mapped[str] = mapped_column(String(255))
+    timezone: Mapped[str] = mapped_column(String(64), default="UTC")
+    is_primary: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user: Mapped["User"] = relationship(back_populates="calendar_accounts")
+
+
+class CalendarSyncStateModel(Base):
+    __tablename__ = "calendar_sync_state"
+    __table_args__ = (UniqueConstraint("user_id", "provider", "provider_calendar_id", name="uq_calendar_sync_state"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    provider: Mapped[CalendarProvider] = mapped_column(SqlEnum(CalendarProvider), default=CalendarProvider.google)
+    provider_calendar_id: Mapped[str] = mapped_column(String(255), index=True)
+    sync_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_full_sync_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_incremental_sync_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    health_status: Mapped[str] = mapped_column(String(32), default="ok")
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user: Mapped["User"] = relationship(back_populates="calendar_sync_states")
+
+
+class CalendarCategory(Base):
+    __tablename__ = "calendar_categories"
+    __table_args__ = (UniqueConstraint("user_id", "name", name="uq_calendar_category_user_name"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    name: Mapped[str] = mapped_column(String(64))
+    color_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user: Mapped["User"] = relationship(back_populates="calendar_categories")
+    events: Mapped[list["CalendarEvent"]] = relationship()
+
+
+class CalendarEvent(Base):
+    __tablename__ = "calendar_events"
+    __table_args__ = (
+        UniqueConstraint("provider", "provider_event_id", name="uq_calendar_provider_event"),
+        UniqueConstraint("user_id", "recurring_event_id", "original_start_at", name="uq_calendar_recurring_instance"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    provider: Mapped[CalendarProvider] = mapped_column(SqlEnum(CalendarProvider), default=CalendarProvider.google)
+    provider_calendar_id: Mapped[str] = mapped_column(String(255), index=True)
+    provider_event_id: Mapped[str] = mapped_column(String(255), index=True)
+    etag: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    sequence: Mapped[int] = mapped_column(Integer, default=0)
+
+    title: Mapped[str] = mapped_column(String(255), default="Event")
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    location: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    start_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    end_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    timezone: Mapped[str] = mapped_column(String(64), default="UTC")
+    is_all_day: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    status: Mapped[CalendarEventStatus] = mapped_column(SqlEnum(CalendarEventStatus), default=CalendarEventStatus.confirmed)
+    visibility: Mapped[CalendarVisibility] = mapped_column(SqlEnum(CalendarVisibility), default=CalendarVisibility.default)
+    transparency: Mapped[CalendarTransparency] = mapped_column(SqlEnum(CalendarTransparency), default=CalendarTransparency.opaque)
+    event_type: Mapped[str] = mapped_column(String(64), default="default")
+    color_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+    is_recurring_master: Mapped[bool] = mapped_column(Boolean, default=False)
+    recurrence_rule_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    recurring_event_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    original_start_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    reminder_use_default: Mapped[bool] = mapped_column(Boolean, default=True)
+    conference_link: Mapped[str | None] = mapped_column(Text, nullable=True)
+    html_link: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    source_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    sync_state: Mapped[CalendarSyncState] = mapped_column(SqlEnum(CalendarSyncState), default=CalendarSyncState.synced)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    category_id: Mapped[int | None] = mapped_column(ForeignKey("calendar_categories.id"), nullable=True, index=True)
+
+    user: Mapped["User"] = relationship(back_populates="calendar_events")
+    reminders: Mapped[list["CalendarReminder"]] = relationship(back_populates="event", cascade="all, delete-orphan")
+
+
+class CalendarReminder(Base):
+    __tablename__ = "calendar_reminders"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    event_id: Mapped[int] = mapped_column(ForeignKey("calendar_events.id"), index=True)
+    method: Mapped[str] = mapped_column(String(32), default="popup")
+    minutes: Mapped[int] = mapped_column(Integer, default=10)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    event: Mapped["CalendarEvent"] = relationship(back_populates="reminders")
+
+
+class CalendarOutbox(Base):
+    __tablename__ = "calendar_outbox"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    event_id: Mapped[int] = mapped_column(ForeignKey("calendar_events.id"), index=True)
+    provider: Mapped[CalendarProvider] = mapped_column(SqlEnum(CalendarProvider), default=CalendarProvider.google)
+    operation: Mapped[CalendarOutboxOp] = mapped_column(SqlEnum(CalendarOutboxOp), default=CalendarOutboxOp.upsert)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    available_after: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user: Mapped["User"] = relationship(back_populates="calendar_outbox_items")

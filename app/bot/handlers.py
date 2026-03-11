@@ -16,6 +16,9 @@ from app.database.db import SessionLocal
 from app.database.models import Activity, EnergyCost, Habit, Task, TaskStatus, User
 from app.integrations.google_calendar import GoogleCalendarService
 from app.integrations.openai_client import OpenAIClient
+from app.services.calendar_domain_service import CalendarDomainService
+from app.services.calendar_read_service import CalendarReadService
+from app.services.calendar_sync_service import CalendarSyncService
 from app.services.habit_tracker import HabitTracker
 from app.services.knowledge_service import KnowledgeService
 from app.services.scheduler import AIScheduler
@@ -115,8 +118,10 @@ def _format_calendar_events(events: list, timezone_name: str, max_items: int | N
     lines: list[str] = []
     iter_events = events if max_items is None else events[:max_items]
     for event in iter_events:
-        start = event.start_time
-        end = event.end_time
+        start = getattr(event, "start_at", None) or getattr(event, "start_time", None)
+        end = getattr(event, "end_at", None) or getattr(event, "end_time", None)
+        if not start or not end:
+            continue
         if start.tzinfo is None:
             start = start.replace(tzinfo=ZoneInfo("UTC"))
         if end.tzinfo is None:
@@ -124,12 +129,15 @@ def _format_calendar_events(events: list, timezone_name: str, max_items: int | N
         local_start = start.astimezone(tz)
         local_end = end.astimezone(tz)
 
-        title = (event.title or "Без названия").strip()
+        title = (getattr(event, "title", None) or "Без названия").strip()
         if not title:
             title = "Без названия"
 
+        is_all_day = bool(getattr(event, "is_all_day", False))
         duration_minutes = int((local_end - local_start).total_seconds() // 60)
-        if duration_minutes <= 0:
+        if is_all_day:
+            time_part = "Весь день"
+        elif duration_minutes <= 0:
             time_part = f"{local_start.strftime('%H:%M')} • короткое событие"
         elif duration_minutes >= 23 * 60:
             time_part = "Весь день"
@@ -224,8 +232,10 @@ def _save_calendar_snapshot(context: ContextEngine, events: list, timezone_name:
         tz = ZoneInfo("UTC")
     payload = {"date": day_label, "timezone": timezone_name, "events": []}
     for idx, event in enumerate(events, start=1):
-        start = event.start_time
-        end = event.end_time
+        start = getattr(event, "start_at", None) or getattr(event, "start_time", None)
+        end = getattr(event, "end_at", None) or getattr(event, "end_time", None)
+        if not start or not end:
+            continue
         if start.tzinfo is None:
             start = start.replace(tzinfo=ZoneInfo("UTC"))
         if end.tzinfo is None:
@@ -235,8 +245,9 @@ def _save_calendar_snapshot(context: ContextEngine, events: list, timezone_name:
         payload["events"].append(
             {
                 "index": idx,
-                "event_id": event.calendar_event_id or "",
-                "title": (event.title or "Без названия").strip() or "Без названия",
+                "event_id": getattr(event, "provider_event_id", None) or getattr(event, "calendar_event_id", None) or "",
+                "local_event_id": getattr(event, "id", None),
+                "title": (getattr(event, "title", None) or "Без названия").strip() or "Без названия",
                 "start": local_start.strftime("%H:%M"),
                 "end": local_end.strftime("%H:%M"),
             }
@@ -305,7 +316,14 @@ def _append_chat_backlog_item(user_id: int, user_text: str, issue: str) -> None:
         pass
 
 
-def _delete_calendar_event_from_snapshot(text: str, context: ContextEngine, gcal: GoogleCalendarService) -> str:
+def _delete_calendar_event_from_snapshot(
+    text: str,
+    context: ContextEngine,
+    calendar_domain: CalendarDomainService,
+    calendar_sync: CalendarSyncService,
+    user_id: int,
+    provider_calendar_id: str,
+) -> str:
     raw = context.get_memory("last_calendar_snapshot")
     if not raw:
         return "Сначала покажу события на день, чтобы выбрать точное событие для удаления."
@@ -340,7 +358,7 @@ def _delete_calendar_event_from_snapshot(text: str, context: ContextEngine, gcal
     elif title_hint:
         candidates = [row for row in events if title_hint in (row.get("title") or "").lower()]
 
-    candidates = [row for row in candidates if row.get("event_id")]
+    candidates = [row for row in candidates if row.get("local_event_id")]
     if not candidates:
         return "Не нашел событие в календаре по этому описанию. Укажи время, например: 'удали событие 13:45-14:00 Обед'."
     if len(candidates) > 1:
@@ -350,14 +368,22 @@ def _delete_calendar_event_from_snapshot(text: str, context: ContextEngine, gcal
         return "Нашел несколько событий. Укажи номер, например: 'удали #13'\n" + rows
 
     target = candidates[0]
-    ok = gcal.delete_event(target["event_id"])
+    ok = calendar_domain.delete_local_event(user_id, int(target["local_event_id"]))
     if not ok:
-        return "Не получилось удалить событие в Google Calendar. Попробуй еще раз через пару секунд."
+        return "Не получилось удалить событие. Попробуй еще раз через пару секунд."
+    calendar_sync.sync_now(user_id, provider_calendar_id)
     context.set_memory("pending_calendar_delete", "")
     return f"Удалил событие: {target['start']}–{target['end']}  {target['title']} ({day_label})."
 
 
-def _try_resolve_pending_calendar_delete(text: str, context: ContextEngine, gcal: GoogleCalendarService) -> str | None:
+def _try_resolve_pending_calendar_delete(
+    text: str,
+    context: ContextEngine,
+    calendar_domain: CalendarDomainService,
+    calendar_sync: CalendarSyncService,
+    user_id: int,
+    provider_calendar_id: str,
+) -> str | None:
     raw = context.get_memory("pending_calendar_delete")
     if not raw:
         return None
@@ -394,9 +420,11 @@ def _try_resolve_pending_calendar_delete(text: str, context: ContextEngine, gcal
         rows = "\n".join([f"- #{row['index']} {row['start']}–{row['end']}  {row['title']}" for row in candidates[:8]])
         return "Не понял, какое именно удалить. Напиши номер:\n" + rows
 
-    ok = gcal.delete_event(selected.get("event_id") or "")
+    local_event_id = int(selected.get("local_event_id") or 0)
+    ok = local_event_id > 0 and calendar_domain.delete_local_event(user_id, local_event_id)
     if not ok:
         return "Не получилось удалить выбранное событие. Попробуй еще раз."
+    calendar_sync.sync_now(user_id, provider_calendar_id)
     context.set_memory("pending_calendar_delete", "")
     day_label = pending.get("day_label") or "выбранный день"
     return f"Удалил событие: {selected['start']}–{selected['end']}  {selected['title']} ({day_label})."
@@ -428,6 +456,10 @@ async def natural_chat_handler(message: Message) -> None:
         user = _ensure_user(db, message.from_user.id, message.from_user.full_name if message.from_user else "User")
         ks = KnowledgeService(db, user.id)
         context = ContextEngine(db, user.id)
+        calendar_read = CalendarReadService(db)
+        calendar_domain = CalendarDomainService(db)
+        calendar_sync = CalendarSyncService(db)
+        provider_calendar_id = settings.google_calendar_id
         ks.add_turn(role="user", content=text, intent="incoming")
         ks.learn_from_message(text)
 
@@ -466,13 +498,21 @@ async def natural_chat_handler(message: Message) -> None:
                 ks.add_turn(role="assistant", content=reply, intent="calendar_add")
                 return
 
-            created = gcal.add_event(user.id, payload["title"], payload["start_local"], payload["end_local"])
-            day_start, day_end = _build_user_day_window_utc(calendar_tz)
-            refreshed = gcal.list_events(user.id, day_start, day_end)
+            calendar_domain.create_local_event(
+                user.id,
+                provider_calendar_id,
+                payload["title"],
+                payload["start_local"].astimezone(timezone.utc).replace(tzinfo=None),
+                payload["end_local"].astimezone(timezone.utc).replace(tzinfo=None),
+                calendar_tz,
+                details={"description": params.get("description"), "location": params.get("location")},
+            )
+            calendar_sync.sync_now(user.id, provider_calendar_id)
+            _, refreshed = calendar_read.list_day_events(user.id, calendar_tz, 0)
             _save_calendar_snapshot(context, refreshed, calendar_tz, payload["day_label"])
             # Deterministic factual confirmation for critical write action.
             reply = (
-                f"Готово. Добавил в Google Calendar: "
+                f"Готово. Добавил в календарь: "
                 f"{payload['start_local'].strftime('%H:%M')}–{payload['end_local'].strftime('%H:%M')} "
                 f"{payload['title']} ({payload['day_label']})."
             )
@@ -481,33 +521,43 @@ async def natural_chat_handler(message: Message) -> None:
             return
 
         if intent == ChatIntent.calendar_delete:
-            gcal = GoogleCalendarService()
-            reply = _delete_calendar_event_from_snapshot(normalized_text, context, gcal)
+            reply = _delete_calendar_event_from_snapshot(
+                normalized_text,
+                context,
+                calendar_domain,
+                calendar_sync,
+                user.id,
+                provider_calendar_id,
+            )
             await message.answer(reply)
             ks.add_turn(role="assistant", content=reply, intent="calendar_delete")
             if "Не нашел событие" in reply or "Не получилось" in reply:
                 _append_chat_backlog_item(user.telegram_id, text, "calendar_delete_matching_or_api_error")
             # Refresh snapshot after successful deletion.
             if reply.startswith("Удалил событие:"):
-                calendar_tz = gcal.get_calendar_timezone() or user.timezone or settings.timezone
-                day_start, day_end = _build_user_day_window_utc(calendar_tz)
+                calendar_tz = GoogleCalendarService().get_calendar_timezone() or user.timezone or settings.timezone
                 day_label = _build_local_day_label(calendar_tz)
-                refreshed = gcal.list_events(user.id, day_start, day_end)
+                _, refreshed = calendar_read.list_day_events(user.id, calendar_tz, 0)
                 _save_calendar_snapshot(context, refreshed, calendar_tz, day_label)
             return
 
         if intent == ChatIntent.calendar_delete_pending:
-            pending_reply = _try_resolve_pending_calendar_delete(normalized_text, context, GoogleCalendarService())
+            pending_reply = _try_resolve_pending_calendar_delete(
+                normalized_text,
+                context,
+                calendar_domain,
+                calendar_sync,
+                user.id,
+                provider_calendar_id,
+            )
             if not pending_reply:
                 pending_reply = "Уточни, какое событие удалить: например 'удали #13' или 'отмена'."
             await message.answer(pending_reply)
             ks.add_turn(role="assistant", content=pending_reply, intent="calendar_delete_pending")
             if pending_reply.startswith("Удалил событие:"):
-                gcal = GoogleCalendarService()
-                calendar_tz = gcal.get_calendar_timezone() or user.timezone or settings.timezone
-                day_start, day_end = _build_user_day_window_utc(calendar_tz)
+                calendar_tz = GoogleCalendarService().get_calendar_timezone() or user.timezone or settings.timezone
                 day_label = _build_local_day_label(calendar_tz)
-                refreshed = gcal.list_events(user.id, day_start, day_end)
+                _, refreshed = calendar_read.list_day_events(user.id, calendar_tz, 0)
                 _save_calendar_snapshot(context, refreshed, calendar_tz, day_label)
             return
 
@@ -533,26 +583,29 @@ async def natural_chat_handler(message: Message) -> None:
             ks.add_turn(role="assistant", content=reply, intent="calendar_modify_help")
             return
         if intent == ChatIntent.plan_day:
-            # For this user flow, "plan for today" must come strictly from Google Calendar.
+            # Local-first: read from local calendar store, sync with Google as secondary path.
             gcal = GoogleCalendarService()
             calendar_tz = gcal.get_calendar_timezone() or user.timezone or settings.timezone
-            day_start, day_end = _build_user_day_window_utc(calendar_tz)
             day_label = _build_local_day_label(calendar_tz)
-            events = gcal.list_events(user.id, day_start, day_end)
+            _, events = calendar_read.list_day_events(user.id, calendar_tz, 0)
+            if not events:
+                # Fallback sync when local cache is empty.
+                calendar_sync.pull_incremental(user.id, provider_calendar_id)
+                _, events = calendar_read.list_day_events(user.id, calendar_tz, 0)
             if events:
                 rows = _format_calendar_events(events, calendar_tz, max_items=None)
                 reply = ks.reply_with_backend_result(
                     text,
                     operation="plan_day_from_calendar",
                     payload={"date": day_label, "timezone": calendar_tz, "rows_text": rows},
-                ) or f"План на {day_label} (из Google Calendar):\n{rows}"
+                ) or f"План на {day_label}:\n{rows}"
                 _save_calendar_snapshot(context, events, calendar_tz, day_label)
             else:
                 reply = ks.reply_with_backend_result(
                     text,
                     operation="plan_day_from_calendar_empty",
                     payload={"date": day_label, "timezone": calendar_tz},
-                ) or f"В Google Calendar на {day_label} событий нет."
+                ) or f"На {day_label} событий нет."
             await message.answer(reply)
             ks.add_turn(role="assistant", content=reply, intent="plan_day")
             ks.maybe_learn_from_dialogue(text, reply)
@@ -632,13 +685,12 @@ async def natural_chat_handler(message: Message) -> None:
         if intent == ChatIntent.connections_check:
             gcal = GoogleCalendarService()
             calendar_tz = gcal.get_calendar_timezone() or user.timezone or settings.timezone
-            day_start, day_end = _build_user_day_window_utc(calendar_tz)
-            events = gcal.list_events(user.id, day_start, day_end)
+            _, events = calendar_read.list_day_events(user.id, calendar_tz, 0)
             yougile_count = SyncService(db).sync_yougile_tasks(user.id)
             ai_client = OpenAIClient()
             ai_state = "подключен" if ai_client.provider != "disabled" else "не подключен"
             ai_label = f"{ai_client.provider}/{ai_client.model}" if ai_client.provider != "disabled" else "disabled"
-            calendar_state = "подключен" if events is not None else "ошибка подключения"
+            calendar_state = "локальная БД (primary)"
             yougile_state = "подключен" if yougile_count >= 0 else "ошибка подключения"
             reply = (
                 "Статус интеграций:\n"
@@ -654,9 +706,12 @@ async def natural_chat_handler(message: Message) -> None:
         if intent == ChatIntent.calendar_check:
             gcal = GoogleCalendarService()
             calendar_tz = gcal.get_calendar_timezone() or user.timezone or settings.timezone
-            day_start, day_end = _build_user_day_window_utc(calendar_tz)
             day_label = _build_local_day_label(calendar_tz)
-            events = gcal.list_events(user.id, day_start, day_end)
+            _, events = calendar_read.list_day_events(user.id, calendar_tz, 0)
+            if not events:
+                # Fallback sync when local cache is empty.
+                calendar_sync.pull_incremental(user.id, provider_calendar_id)
+                _, events = calendar_read.list_day_events(user.id, calendar_tz, 0)
             if events:
                 is_exact = response_mode == "calendar_exact"
                 rows = _format_calendar_events(events, calendar_tz, max_items=None if is_exact else 20)

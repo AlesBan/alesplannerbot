@@ -58,6 +58,28 @@ jobs:
             exit 0
           fi
 
+          if [ -z "${CHANGED_FILES:-}" ]; then
+            echo "No changed files detected, skipping deploy."
+            exit 0
+          fi
+
+          trigger_api_deploy() {
+            service_id="$1"
+            curl --fail --silent --show-error \
+              -X POST "https://api.render.com/v1/services/${service_id}/deploys" \
+              -H "Authorization: Bearer ${RENDER_API_KEY}" \
+              -H "Content-Type: application/json" \
+              -d '{}'
+          }
+
+          deploy_bot() {
+            trigger_api_deploy "${RENDER_BOT_SERVICE_ID}"
+          }
+
+          deploy_api() {
+            trigger_api_deploy "${RENDER_API_SERVICE_ID}"
+          }
+
           should_deploy_bot=false
           should_deploy_api=false
 
@@ -76,21 +98,13 @@ jobs:
           done <<< "$CHANGED_FILES"
 
           if [ "$should_deploy_bot" = true ]; then
-            curl --fail --silent --show-error \
-              -X POST "https://api.render.com/v1/services/${RENDER_BOT_SERVICE_ID}/deploys" \
-              -H "Authorization: Bearer ${RENDER_API_KEY}" \
-              -H "Content-Type: application/json" \
-              -d '{}'
+            deploy_bot
           else
             echo "No bot-impacting files changed; skipping bot deploy."
           fi
 
           if [ "$should_deploy_api" = true ]; then
-            curl --fail --silent --show-error \
-              -X POST "https://api.render.com/v1/services/${RENDER_API_SERVICE_ID}/deploys" \
-              -H "Authorization: Bearer ${RENDER_API_KEY}" \
-              -H "Content-Type: application/json" \
-              -d '{}'
+            deploy_api
           else
             echo "No api-impacting files changed; skipping api deploy."
           fi
