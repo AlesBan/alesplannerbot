@@ -583,6 +583,7 @@ async def natural_chat_handler(message: Message) -> None:
         provider_calendar_id = settings.google_calendar_id
         ks.add_turn(role="user", content=text, intent="incoming")
         ks.learn_from_message(text)
+        normalized_cmd = _normalize_command_text(text)
 
         training_cmd = _training_mode_command(text)
         if training_cmd == "on":
@@ -598,7 +599,6 @@ async def natural_chat_handler(message: Message) -> None:
             ks.add_turn(role="assistant", content=reply, intent="training_mode_off")
             return
 
-        normalized_cmd = _normalize_command_text(text)
         if normalized_cmd in {"покажи чему ты научился", "чему ты научился", "покажи обучение"}:
             rows = ks.list_taught_pairs(limit=8)
             if not rows:
@@ -637,6 +637,30 @@ async def natural_chat_handler(message: Message) -> None:
                 reply = f"Удалил последнее обучение для вопроса: {q}"
             await message.answer(reply)
             ks.add_turn(role="assistant", content=reply, intent="training_forget_last")
+            return
+
+        # Fast-path for latency-sensitive queries: skip LLM routing entirely.
+        if normalized_cmd in {"now"} or _looks_like_current_focus_query(normalized_cmd):
+            calendar_tz = context.get_memory("calendar_timezone") or user.timezone or settings.timezone
+            _, events = calendar_read.list_day_events(user.id, calendar_tz, 0)
+            reply = _format_current_focus(events, calendar_tz)
+            await message.answer(reply)
+            ks.add_turn(role="assistant", content=reply, intent="current_focus")
+            ks.maybe_learn_from_dialogue(text, reply)
+            return
+
+        if normalized_cmd in {"today", "покажи события на сегодня"}:
+            calendar_tz = context.get_memory("calendar_timezone") or user.timezone or settings.timezone
+            day_label = _build_local_day_label(calendar_tz)
+            _, events = calendar_read.list_day_events(user.id, calendar_tz, 0)
+            if events:
+                rows = _format_calendar_events(events, calendar_tz, max_items=None)
+                reply = f"События на {day_label}:\n{rows}"
+                _save_calendar_snapshot(context, events, calendar_tz, day_label)
+            else:
+                reply = f"На {day_label} событий нет."
+            await message.answer(reply)
+            ks.add_turn(role="assistant", content=reply, intent="calendar_check")
             return
 
         if _is_expectation_feedback_text(text):
@@ -927,6 +951,7 @@ async def natural_chat_handler(message: Message) -> None:
         if intent == ChatIntent.current_focus or _looks_like_current_focus_query(normalized_text):
             gcal = GoogleCalendarService()
             calendar_tz = gcal.get_calendar_timezone() or user.timezone or settings.timezone
+            context.set_memory("calendar_timezone", calendar_tz)
             _, events = calendar_read.list_day_events(user.id, calendar_tz, 0)
             if not events:
                 calendar_sync.pull_incremental(user.id, provider_calendar_id)
@@ -935,37 +960,6 @@ async def natural_chat_handler(message: Message) -> None:
             await message.answer(reply)
             ks.add_turn(role="assistant", content=reply, intent="current_focus")
             ks.maybe_learn_from_dialogue(text, reply)
-            return
-
-        if normalized_cmd in {"now"}:
-            gcal = GoogleCalendarService()
-            calendar_tz = gcal.get_calendar_timezone() or user.timezone or settings.timezone
-            _, events = calendar_read.list_day_events(user.id, calendar_tz, 0)
-            if not events:
-                calendar_sync.pull_incremental(user.id, provider_calendar_id)
-                _, events = calendar_read.list_day_events(user.id, calendar_tz, 0)
-            reply = _format_current_focus(events, calendar_tz)
-            await message.answer(reply)
-            ks.add_turn(role="assistant", content=reply, intent="current_focus")
-            ks.maybe_learn_from_dialogue(text, reply)
-            return
-
-        if normalized_cmd in {"today"}:
-            gcal = GoogleCalendarService()
-            calendar_tz = gcal.get_calendar_timezone() or user.timezone or settings.timezone
-            day_label = _build_local_day_label(calendar_tz)
-            _, events = calendar_read.list_day_events(user.id, calendar_tz, 0)
-            if not events:
-                calendar_sync.pull_incremental(user.id, provider_calendar_id)
-                _, events = calendar_read.list_day_events(user.id, calendar_tz, 0)
-            if events:
-                rows = _format_calendar_events(events, calendar_tz, max_items=None)
-                reply = f"События на {day_label}:\n{rows}"
-                _save_calendar_snapshot(context, events, calendar_tz, day_label)
-            else:
-                reply = f"На {day_label} событий нет."
-            await message.answer(reply)
-            ks.add_turn(role="assistant", content=reply, intent="calendar_check")
             return
 
         taught = ks.find_taught_answer(normalized_text)
