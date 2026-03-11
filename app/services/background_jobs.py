@@ -54,7 +54,6 @@ class BackgroundJobs:
         self.scheduler.add_job(self._morning_plan_job, trigger="cron", minute="0")
         self.scheduler.add_job(self._evening_review_job, trigger="cron", minute="10")
         self.scheduler.add_job(self._sync_yougile_job, trigger="interval", minutes=30)
-        self.scheduler.add_job(self._proactive_nudge_job, trigger="interval", minutes=60)
         self.scheduler.start()
 
     def shutdown(self) -> None:
