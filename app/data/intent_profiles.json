@@ -1,0 +1,18 @@
+[
+  {
+    "profile_name": "current_focus",
+    "token_keywords": ["сейчас", "теперь", "дело", "заниматься", "what", "now", "current", "focus"],
+    "phrase_keywords": ["что у меня на сейчас", "на сейчас", "чем я должен сейчас", "what now", "right now"],
+    "aliases": ["now", "current_focus", "current focus"],
+    "threshold": 0.45,
+    "enabled": true
+  },
+  {
+    "profile_name": "bedtime",
+    "token_keywords": ["кровати", "кровать", "ложиться", "сон", "sleep", "bedtime", "bed"],
+    "phrase_keywords": ["когда я должен быть в кровати", "во сколько в кровать", "во сколько ложиться", "когда сон"],
+    "aliases": ["bedtime", "sleep_time", "sleep time"],
+    "threshold": 0.5,
+    "enabled": true
+  }
+]

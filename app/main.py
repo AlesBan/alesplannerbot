@@ -1,6 +1,9 @@
 from datetime import datetime, timezone
+import csv
+import io
 
 from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi.responses import HTMLResponse, PlainTextResponse
 from dateutil import parser as date_parser
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -15,6 +18,8 @@ from app.integrations.google_calendar import GoogleCalendarService
 from app.services.calendar_domain_service import CalendarDomainService
 from app.services.calendar_read_service import CalendarReadService
 from app.services.calendar_sync_service import CalendarSyncService
+from app.services.eval_harness import EvalHarnessService
+from app.services.intent_profile_service import IntentProfileService
 from app.services.knowledge_service import KnowledgeService
 from app.services.scheduler import AIScheduler
 from app.services.sync_service import SyncService
@@ -47,11 +52,18 @@ class CalendarEventPatchIn(BaseModel):
     reminders: list[dict] | None = None
 
 
+class EvalRateIn(BaseModel):
+    item_id: int
+    rating: str = Field(pattern=r"^[+-]$")
+    note: str = ""
+
+
 @app.on_event("startup")
 def on_startup() -> None:
     Base.metadata.create_all(bind=engine)
     with SessionLocal() as db:
         KnowledgeService.seed_global_knowledge(db)
+        IntentProfileService.seed_defaults(db)
 
 
 @app.get("/health")
@@ -254,3 +266,183 @@ def calendar_full_import(telegram_id: int, years_back: int = 2, years_forward: i
         years_forward=years_forward,
     )
     return {"imported": imported, "years_back": years_back, "years_forward": years_forward}
+
+
+@app.post("/eval/run/{telegram_id}")
+def create_eval_run(
+    telegram_id: int,
+    count: int = Query(default=100, ge=10, le=500),
+    questions_file: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+) -> dict:
+    _get_user_by_telegram(db, telegram_id)
+    run = EvalHarnessService(db).generate_run(telegram_id, count=count, questions_source_path=questions_file)
+    return {
+        "run_id": run["run_id"],
+        "items": len(run.get("items", [])),
+        "source": run.get("source", "templates"),
+        "ui_url": f"/eval/ui/{run['run_id']}",
+        "json_url": f"/eval/run/{run['run_id']}",
+        "csv_url": f"/eval/run/{run['run_id']}/export.csv",
+    }
+
+
+@app.post("/eval/questions/template")
+def create_eval_questions_template(path: str | None = Query(default=None), rows: int = Query(default=30, ge=5, le=500)) -> dict:
+    saved = EvalHarnessService.create_questions_template(path=path, rows=rows)
+    return {"ok": True, "path": saved}
+
+
+@app.get("/eval/run/{run_id}")
+def get_eval_run(run_id: str) -> dict:
+    run = EvalHarnessService.load_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return run
+
+
+@app.post("/eval/run/{run_id}/rate")
+def rate_eval_item(run_id: str, payload: EvalRateIn) -> dict:
+    updated = EvalHarnessService.rate_item(run_id, payload.item_id, payload.rating, payload.note)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Run not found")
+    rated = [it for it in updated.get("items", []) if it.get("rating") in {"+", "-"}]
+    good = sum(1 for it in rated if it.get("rating") == "+")
+    bad = sum(1 for it in rated if it.get("rating") == "-")
+    return {"ok": True, "rated": len(rated), "good": good, "bad": bad}
+
+
+@app.post("/eval/run/{run_id}/auto-rate")
+def auto_rate_eval_run(run_id: str) -> dict:
+    updated = EvalHarnessService.auto_rate_run(run_id)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Run not found")
+    summary = updated.get("autograde_summary") or {}
+    return {
+        "ok": True,
+        "run_id": run_id,
+        "good": int(summary.get("good") or 0),
+        "bad": int(summary.get("bad") or 0),
+        "accuracy": float(summary.get("accuracy") or 0.0),
+    }
+
+
+@app.post("/eval/autopilot/{telegram_id}")
+def create_eval_autopilot(
+    telegram_id: int,
+    count: int = Query(default=100, ge=10, le=500),
+    questions_file: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+) -> dict:
+    _get_user_by_telegram(db, telegram_id)
+    run = EvalHarnessService(db).generate_run(telegram_id, count=count, questions_source_path=questions_file)
+    updated = EvalHarnessService.auto_rate_run(run["run_id"])
+    summary = (updated or {}).get("autograde_summary") or {}
+    return {
+        "ok": True,
+        "run_id": run["run_id"],
+        "items": len(run.get("items", [])),
+        "source": run.get("source", "templates"),
+        "good": int(summary.get("good") or 0),
+        "bad": int(summary.get("bad") or 0),
+        "accuracy": float(summary.get("accuracy") or 0.0),
+        "json_url": f"/eval/run/{run['run_id']}",
+        "csv_url": f"/eval/run/{run['run_id']}/export.csv",
+        "ui_url": f"/eval/ui/{run['run_id']}",
+    }
+
+
+@app.get("/eval/run/{run_id}/export.csv")
+def export_eval_csv(run_id: str) -> PlainTextResponse:
+    run = EvalHarnessService.load_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow(["id", "question", "answer", "predicted_intent", "score", "rating", "note"])
+    for item in run.get("items", []):
+        writer.writerow(
+            [
+                item.get("id"),
+                item.get("question", ""),
+                item.get("answer", ""),
+                item.get("predicted_intent", ""),
+                item.get("score", ""),
+                item.get("rating", ""),
+                item.get("note", ""),
+            ]
+        )
+    return PlainTextResponse(out.getvalue(), media_type="text/csv; charset=utf-8")
+
+
+@app.get("/eval/ui/{run_id}", response_class=HTMLResponse)
+def eval_ui(run_id: str) -> HTMLResponse:
+    run = EvalHarnessService.load_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    html = f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Eval UI {run_id}</title>
+  <style>
+    body {{ font-family: Arial, sans-serif; margin: 16px; }}
+    table {{ width: 100%; border-collapse: collapse; }}
+    td, th {{ border: 1px solid #ddd; padding: 8px; vertical-align: top; }}
+    button {{ margin-right: 6px; }}
+    .ok {{ color: #0a7a0a; font-weight: bold; }}
+    .bad {{ color: #b20000; font-weight: bold; }}
+  </style>
+</head>
+<body>
+  <h2>Eval Run: {run_id}</h2>
+  <p>Rows: {len(run.get("items", []))}. Нажимай Верно / Неверно. Комментарий по желанию.</p>
+  <p>Source: {run.get("source", "templates")}</p>
+  <p><a href="/eval/run/{run_id}/export.csv">Download CSV</a></p>
+  <table>
+    <thead><tr><th>#</th><th>Question</th><th>Bot Answer</th><th>Intent/Score</th><th>Оценка</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+<script>
+  const run = {json_dumps_for_html(run)};
+  const tbody = document.getElementById("rows");
+  function render() {{
+    tbody.innerHTML = "";
+    run.items.forEach((it) => {{
+      const tr = document.createElement("tr");
+      const ratingClass = it.rating === "+" ? "ok" : (it.rating === "-" ? "bad" : "");
+      tr.innerHTML = `
+        <td>${{it.id}}</td>
+        <td>${{it.question}}</td>
+        <td>${{(it.answer || "").replaceAll("\\n","<br/>")}}</td>
+        <td>${{it.predicted_intent}} / ${{it.score}}</td>
+        <td>
+          <button onclick="rate(${{it.id}}, '+')">Верно</button>
+          <button onclick="rate(${{it.id}}, '-')">Неверно</button>
+          <span class="${{ratingClass}}">${{it.rating || ""}}</span><br/>
+          <input id="note-${{it.id}}" style="width:260px" placeholder="комментарий (опционально)" value="${{it.note || ''}}" />
+        </td>`;
+      tbody.appendChild(tr);
+    }});
+  }}
+  async function rate(id, value) {{
+    const note = document.getElementById(`note-${{id}}`)?.value || "";
+    await fetch(`/eval/run/{run_id}/rate`, {{
+      method: "POST",
+      headers: {{ "Content-Type": "application/json" }},
+      body: JSON.stringify({{ item_id: id, rating: value, note }})
+    }});
+    const item = run.items.find(x => x.id === id);
+    if (item) {{ item.rating = value; item.note = note; }}
+    render();
+  }}
+  render();
+</script>
+</body>
+</html>"""
+    return HTMLResponse(html)
+
+
+def json_dumps_for_html(payload: dict) -> str:
+    import json
+    return json.dumps(payload, ensure_ascii=False)

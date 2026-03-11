@@ -6,30 +6,35 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
-from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, Message, ReplyKeyboardMarkup
 
 from app.ai.chat_assistant import ChatAssistant, ChatIntent
 from app.ai.context_engine import ContextEngine
 from app.ai.planner import AIPlanner
 from app.ai.recommendations import RecommendationEngine
 from app.database.db import SessionLocal
-from app.database.models import Activity, EnergyCost, Habit, Task, TaskStatus, User
+from app.database.models import Activity, EnergyCost, Habit, Task, TaskStatus, TrainingFeedback, User
 from app.integrations.google_calendar import GoogleCalendarService
 from app.integrations.openai_client import OpenAIClient
 from app.services.calendar_domain_service import CalendarDomainService
 from app.services.calendar_read_service import CalendarReadService
 from app.services.calendar_sync_service import CalendarSyncService
 from app.services.habit_tracker import HabitTracker
+from app.services.intent_profile_service import IntentProfileService
 from app.services.knowledge_service import KnowledgeService
+from app.services.query_profile_matcher import QueryProfileMatcher
 from app.services.scheduler import AIScheduler
 from app.services.sync_service import SyncService
 from app.services.task_manager import TaskManager
+from app.services.eval_harness import EvalHarnessService
 from app.config import get_settings
 
 router = Router()
 chat_assistant = ChatAssistant()
 settings = get_settings()
 BACKLOG_PATH = Path("CHAT_IMPROVEMENT_BACKLOG.md")
+PROFILE_MATCHER = QueryProfileMatcher()
+TRAINING_QUIZ_STATE_KEY = "training_quiz_state"
 
 
 def _ensure_user(db, telegram_id: int, name: str) -> User:
@@ -106,11 +111,99 @@ def _normalize_command_text(text: str) -> str:
 
 def _training_mode_command(text: str) -> str | None:
     lower = _normalize_command_text(text)
-    if lower in {"режим обучения вкл", "режим обучения on", "обучение вкл", "обучение on", "training_on"}:
+    if lower in {"режим обучения вкл", "режим обучения on", "обучение вкл", "обучение on", "training_on"} or lower.startswith(
+        ("режим обучения вкл ", "обучение вкл ", "training_on ")
+    ):
         return "on"
     if lower in {"режим обучения выкл", "режим обучения off", "обучение выкл", "обучение off", "training_off"}:
         return "off"
     return None
+
+
+def _training_on_count(text: str, default_count: int = 30) -> int:
+    lower = _normalize_command_text(text)
+    match = re.search(r"(?:training_on|обучение вкл|режим обучения вкл)\s+(\d+)", lower)
+    if not match:
+        return default_count
+    try:
+        count = int(match.group(1))
+    except Exception:
+        return default_count
+    return max(5, min(100, count))
+
+
+def _training_quiz_keyboard(session_id: str, item_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Верно", callback_data=f"quiz:{session_id}:{item_id}:+"),
+                InlineKeyboardButton(text="Неверно", callback_data=f"quiz:{session_id}:{item_id}:-"),
+            ]
+        ]
+    )
+
+
+def _save_quiz_state(context: ContextEngine, state: dict) -> None:
+    context.set_memory(TRAINING_QUIZ_STATE_KEY, json.dumps(state, ensure_ascii=False))
+
+
+def _load_quiz_state(context: ContextEngine) -> dict | None:
+    raw = context.get_memory(TRAINING_QUIZ_STATE_KEY)
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _clear_quiz_state(context: ContextEngine) -> None:
+    context.set_memory(TRAINING_QUIZ_STATE_KEY, "")
+
+
+def _send_training_quiz_item_text(state: dict, index: int) -> str | None:
+    items = state.get("items") or []
+    total = len(items)
+    if index < 0 or index >= total:
+        return None
+    item = items[index]
+    question = (item.get("question") or "").strip()
+    answer = (item.get("answer") or "").strip()
+    return (
+        f"Вопрос {index + 1}/{total}\n"
+        f"{question}\n\n"
+        f"Ответ бота:\n{answer}\n\n"
+        "Оцени ответ кнопкой ниже."
+    )
+
+
+def _intent_add_phrase_command(text: str) -> tuple[str, str] | None:
+    lower = (text or "").strip().lower()
+    prefix = "добавь фразу в профиль "
+    if not lower.startswith(prefix):
+        return None
+    raw = (text or "").strip()[len(prefix) :]
+    if ":" not in raw:
+        return None
+    profile, phrase = raw.split(":", 1)
+    profile = profile.strip().lower()
+    phrase = phrase.strip()
+    if not profile or not phrase:
+        return None
+    return profile, phrase
+
+
+def _intent_set_threshold_command(text: str) -> tuple[str, float] | None:
+    match = re.match(r"^\s*измени\s+порог\s+([a-zA-Z0-9_\-]+)\s+([0-9]+(?:\.[0-9]+)?)\s*$", (text or "").strip(), re.IGNORECASE)
+    if not match:
+        return None
+    profile = match.group(1).strip().lower()
+    try:
+        value = float(match.group(2))
+    except Exception:
+        return None
+    return profile, value
 
 
 def _main_menu_keyboard() -> ReplyKeyboardMarkup:
@@ -180,19 +273,34 @@ def _format_calendar_events(events: list, timezone_name: str, max_items: int | N
         lines.append(f"- {time_part}  {title}")
     return "\n".join(lines)
 
-
-def _looks_like_current_focus_query(text: str) -> bool:
-    lower = (text or "").lower()
-    patterns = [
-        "на сейчас",
-        "прямо сейчас",
-        "сейчас",
-        "что делать сейчас",
-        "чем я должен сейчас",
-        "what now",
-        "right now",
-    ]
-    return any(p in lower for p in patterns)
+def _extract_bedtime_from_events(events: list, timezone_name: str) -> str | None:
+    try:
+        tz = ZoneInfo(timezone_name)
+    except Exception:
+        tz = ZoneInfo("UTC")
+    candidates: list[tuple[datetime, str]] = []
+    for event in events:
+        title = (getattr(event, "title", None) or "").strip()
+        if not title:
+            continue
+        lower_title = title.lower()
+        # Prefer explicit bedtime event names.
+        if "в кровати" not in lower_title and "bed" not in lower_title:
+            continue
+        start = getattr(event, "start_at", None) or getattr(event, "start_time", None)
+        if not start:
+            continue
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=ZoneInfo("UTC"))
+        local_start = start.astimezone(tz)
+        candidates.append((local_start, title))
+    if not candidates:
+        return None
+    # Return first upcoming bedtime for today, else first found.
+    now_local = datetime.now(tz)
+    upcoming = sorted([row for row in candidates if row[0] >= now_local], key=lambda x: x[0])
+    pick = upcoming[0] if upcoming else sorted(candidates, key=lambda x: x[0])[0]
+    return pick[0].strftime("%H:%M")
 
 
 def _format_current_focus(events: list, timezone_name: str) -> str:
@@ -568,6 +676,104 @@ async def _handle_incoming_text(message: Message, text: str, source: str = "text
     await natural_chat_handler(proxy)  # Reuse the same orchestrated text pipeline.
 
 
+@router.callback_query(F.data.startswith("quiz:"))
+async def training_quiz_callback_handler(callback: CallbackQuery) -> None:
+    payload = (callback.data or "").split(":")
+    if len(payload) != 4:
+        await callback.answer("Некорректные данные кнопки.", show_alert=False)
+        return
+    _prefix, session_id, raw_item_id, mark = payload
+    if mark not in {"+", "-"}:
+        await callback.answer("Некорректная оценка.", show_alert=False)
+        return
+    try:
+        item_id = int(raw_item_id)
+    except Exception:
+        await callback.answer("Некорректный id вопроса.", show_alert=False)
+        return
+
+    if not callback.from_user:
+        await callback.answer("Пользователь не найден.", show_alert=False)
+        return
+
+    with SessionLocal() as db:
+        user = _ensure_user(db, callback.from_user.id, callback.from_user.full_name if callback.from_user else "User")
+        ks = KnowledgeService(db, user.id)
+        context = ContextEngine(db, user.id)
+        state = _load_quiz_state(context)
+        if not state or not state.get("active"):
+            await callback.answer("Сессия обучения не активна. Напиши /training_on.", show_alert=False)
+            return
+        if state.get("session_id") != session_id:
+            await callback.answer("Старая сессия. Запусти /training_on.", show_alert=False)
+            return
+
+        items = state.get("items") or []
+        current_index = int(state.get("index") or 0)
+        if current_index < 0 or current_index >= len(items):
+            await callback.answer("Сессия завершена.", show_alert=False)
+            return
+        current_item = items[current_index]
+        if int(current_item.get("id") or -1) != item_id:
+            await callback.answer("Оцени текущий вопрос.", show_alert=False)
+            return
+
+        feedback = TrainingFeedback(
+            user_id=user.id,
+            session_id=session_id,
+            question=str(current_item.get("question") or ""),
+            answer=str(current_item.get("answer") or ""),
+            expected_intent=(current_item.get("expected_intent") or None),
+            predicted_intent=(current_item.get("predicted_intent") or None),
+            score=float(current_item.get("score")) if current_item.get("score") is not None else None,
+            is_correct=(mark == "+"),
+        )
+        db.add(feedback)
+        db.commit()
+
+        # Avoid duplicate rating on same message.
+        if callback.message:
+            try:
+                await callback.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+
+        next_index = current_index + 1
+        state["index"] = next_index
+        _save_quiz_state(context, state)
+
+        await callback.answer("Сохранено.", show_alert=False)
+
+        if next_index >= len(items):
+            total = len(items)
+            positives = (
+                db.query(TrainingFeedback)
+                .filter(TrainingFeedback.user_id == user.id, TrainingFeedback.session_id == session_id, TrainingFeedback.is_correct.is_(True))
+                .count()
+            )
+            negatives = total - positives
+            reply = (
+                f"Сессия завершена.\n"
+                f"Итого: {total}\n"
+                f"Верно: {positives}\n"
+                f"Неверно: {negatives}\n\n"
+                "Позже можем дообучить бота по этим реакциям."
+            )
+            _clear_quiz_state(context)
+            await callback.message.answer(reply) if callback.message else await callback.bot.send_message(callback.from_user.id, reply)
+            ks.add_turn(role="assistant", content=reply, intent="training_quiz_completed")
+            return
+
+        next_item = items[next_index]
+        text = _send_training_quiz_item_text(state, next_index)
+        if text:
+            kb = _training_quiz_keyboard(session_id, int(next_item.get("id") or next_index + 1))
+            await callback.message.answer(text, reply_markup=kb) if callback.message else await callback.bot.send_message(
+                callback.from_user.id, text, reply_markup=kb
+            )
+            ks.add_turn(role="assistant", content=text, intent="training_quiz_question")
+
+
 @router.message(F.text)
 async def natural_chat_handler(message: Message) -> None:
     text = (message.text or "").strip()
@@ -580,23 +786,98 @@ async def natural_chat_handler(message: Message) -> None:
         calendar_read = CalendarReadService(db)
         calendar_domain = CalendarDomainService(db)
         calendar_sync = CalendarSyncService(db)
+        intent_profile_service = IntentProfileService(db)
         provider_calendar_id = settings.google_calendar_id
+        intent_profiles = intent_profile_service.get_profiles(user.id)
         ks.add_turn(role="user", content=text, intent="incoming")
         ks.learn_from_message(text)
         normalized_cmd = _normalize_command_text(text)
+        cmd_profile, _cmd_profile_score = PROFILE_MATCHER.classify(
+            normalized_cmd,
+            intent_profiles,
+            candidates=("current_focus", "bedtime"),
+        )
 
         training_cmd = _training_mode_command(text)
         if training_cmd == "on":
             ks.set_training_enabled(True)
-            reply = "Ок, режим обучения включен. Пиши: 'я ожидал: ...' — и я буду запоминать корректный формат."
-            await message.answer(reply)
-            ks.add_turn(role="assistant", content=reply, intent="training_mode_on")
+            count = _training_on_count(text, default_count=30)
+            run = EvalHarnessService(db).generate_run(user.telegram_id, count=count)
+            items = run.get("items") or []
+            if not items:
+                reply = "Не получилось запустить тренировку: список вопросов пуст."
+                await message.answer(reply)
+                ks.add_turn(role="assistant", content=reply, intent="training_mode_on_failed")
+                return
+            state = {
+                "active": True,
+                "session_id": run.get("run_id"),
+                "index": 0,
+                "items": items,
+            }
+            _save_quiz_state(context, state)
+            intro = (
+                f"Режим обучения включен. Запускаю сессию на {len(items)} вопросов.\n"
+                "После каждого ответа жми: Верно или Неверно."
+            )
+            first_text = _send_training_quiz_item_text(state, 0) or "Стартуем."
+            first = items[0]
+            kb = _training_quiz_keyboard(state["session_id"], int(first.get("id") or 1))
+            await message.answer(intro)
+            await message.answer(first_text, reply_markup=kb)
+            ks.add_turn(role="assistant", content=intro, intent="training_mode_on")
+            ks.add_turn(role="assistant", content=first_text, intent="training_quiz_question")
             return
         if training_cmd == "off":
             ks.set_training_enabled(False)
-            reply = "Ок, режим обучения выключен. Новые обучающие правки больше не сохраняю."
+            _clear_quiz_state(context)
+            reply = "Ок, режим обучения выключен. Сессию вопросов остановил."
             await message.answer(reply)
             ks.add_turn(role="assistant", content=reply, intent="training_mode_off")
+            return
+
+        if normalized_cmd in {"профили интентов", "интент профили", "intent profiles"}:
+            rows = intent_profile_service.list_profiles(user.id)
+            if not rows:
+                reply = "Профили интентов пока не настроены."
+            else:
+                lines = [
+                    f"- {row['name']}: threshold={row['threshold']:.2f}, phrases={row['phrases_count']}, tokens={row['tokens_count']}"
+                    for row in rows
+                ]
+                reply = "Профили интентов:\n" + "\n".join(lines)
+            await message.answer(reply)
+            ks.add_turn(role="assistant", content=reply, intent="intent_profiles_list")
+            return
+
+        add_phrase_cmd = _intent_add_phrase_command(text)
+        if add_phrase_cmd:
+            profile_name, phrase = add_phrase_cmd
+            ok = intent_profile_service.add_phrase(user.id, profile_name, phrase)
+            if ok:
+                reply = f"Ок, добавил фразу в профиль `{profile_name}`: {phrase}"
+            else:
+                reply = (
+                    f"Не нашел профиль `{profile_name}`. "
+                    "Сначала проверь доступные профили командой: 'профили интентов'."
+                )
+            await message.answer(reply)
+            ks.add_turn(role="assistant", content=reply, intent="intent_profile_add_phrase")
+            return
+
+        set_threshold_cmd = _intent_set_threshold_command(text)
+        if set_threshold_cmd:
+            profile_name, threshold = set_threshold_cmd
+            ok = intent_profile_service.set_threshold(user.id, profile_name, threshold)
+            if ok:
+                reply = f"Ок, порог профиля `{profile_name}` обновлен: {threshold:.2f}"
+            else:
+                reply = (
+                    f"Не получилось обновить порог для `{profile_name}`. "
+                    "Порог должен быть в диапазоне 0..1, а профиль должен существовать."
+                )
+            await message.answer(reply)
+            ks.add_turn(role="assistant", content=reply, intent="intent_profile_set_threshold")
             return
 
         if normalized_cmd in {"покажи чему ты научился", "чему ты научился", "покажи обучение"}:
@@ -639,8 +920,33 @@ async def natural_chat_handler(message: Message) -> None:
             ks.add_turn(role="assistant", content=reply, intent="training_forget_last")
             return
 
+        if normalized_cmd in {"training_results", "результаты обучения", "статистика обучения"}:
+            last = (
+                db.query(TrainingFeedback.session_id)
+                .filter(TrainingFeedback.user_id == user.id)
+                .order_by(TrainingFeedback.created_at.desc())
+                .first()
+            )
+            if not last:
+                reply = "Пока нет оценок по кнопкам Верно/Неверно."
+            else:
+                session_id = last[0]
+                total = db.query(TrainingFeedback).filter(
+                    TrainingFeedback.user_id == user.id, TrainingFeedback.session_id == session_id
+                ).count()
+                good = db.query(TrainingFeedback).filter(
+                    TrainingFeedback.user_id == user.id,
+                    TrainingFeedback.session_id == session_id,
+                    TrainingFeedback.is_correct.is_(True),
+                ).count()
+                bad = total - good
+                reply = f"Последняя сессия {session_id[:8]}...\nИтого: {total}\nВерно: {good}\nНеверно: {bad}"
+            await message.answer(reply)
+            ks.add_turn(role="assistant", content=reply, intent="training_results")
+            return
+
         # Fast-path for latency-sensitive queries: skip LLM routing entirely.
-        if normalized_cmd in {"now"} or _looks_like_current_focus_query(normalized_cmd):
+        if normalized_cmd in {"now"} or cmd_profile == "current_focus":
             calendar_tz = context.get_memory("calendar_timezone") or user.timezone or settings.timezone
             _, events = calendar_read.list_day_events(user.id, calendar_tz, 0)
             reply = _format_current_focus(events, calendar_tz)
@@ -680,6 +986,11 @@ async def natural_chat_handler(message: Message) -> None:
         normalized_text = route["normalized_text"]
         response_mode = route["response_mode"]
         params = route.get("params") if isinstance(route.get("params"), dict) else {}
+        routed_profile, _routed_profile_score = PROFILE_MATCHER.classify(
+            normalized_text,
+            intent_profiles,
+            candidates=("current_focus", "bedtime"),
+        )
 
         if text.lower() == "/start":
             ContextEngine(db, user.id).set_memory("weekly_work_hours", "0")
@@ -948,7 +1259,7 @@ async def natural_chat_handler(message: Message) -> None:
             ks.add_turn(role="assistant", content=reply, intent="calendar_check")
             return
 
-        if intent == ChatIntent.current_focus or _looks_like_current_focus_query(normalized_text):
+        if intent == ChatIntent.current_focus or routed_profile == "current_focus":
             gcal = GoogleCalendarService()
             calendar_tz = gcal.get_calendar_timezone() or user.timezone or settings.timezone
             context.set_memory("calendar_timezone", calendar_tz)
@@ -956,6 +1267,23 @@ async def natural_chat_handler(message: Message) -> None:
             if not events:
                 calendar_sync.pull_incremental(user.id, provider_calendar_id)
                 _, events = calendar_read.list_day_events(user.id, calendar_tz, 0)
+            # Teacher-student override should apply here too, not only in general chat.
+            taught = ks.find_taught_answer(normalized_text)
+            if taught:
+                reply = taught
+                await message.answer(reply)
+                ks.add_turn(role="assistant", content=reply, intent="current_focus")
+                ks.maybe_learn_from_dialogue(text, reply)
+                return
+            # For "bedtime" style questions use deterministic rule from calendar.
+            if routed_profile == "bedtime":
+                bedtime = _extract_bedtime_from_events(events, calendar_tz)
+                if bedtime:
+                    reply = f"В {bedtime}."
+                    await message.answer(reply)
+                    ks.add_turn(role="assistant", content=reply, intent="current_focus")
+                    ks.maybe_learn_from_dialogue(text, reply)
+                    return
             reply = _format_current_focus(events, calendar_tz)
             await message.answer(reply)
             ks.add_turn(role="assistant", content=reply, intent="current_focus")

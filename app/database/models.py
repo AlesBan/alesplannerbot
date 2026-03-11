@@ -1,7 +1,7 @@
 from datetime import datetime
 from enum import Enum
 
-from sqlalchemy import Boolean, DateTime, Enum as SqlEnum, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Enum as SqlEnum, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.db import Base
@@ -86,6 +86,7 @@ class User(Base):
     calendar_events: Mapped[list["CalendarEvent"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     calendar_categories: Mapped[list["CalendarCategory"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     calendar_outbox_items: Mapped[list["CalendarOutbox"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    training_feedback_items: Mapped[list["TrainingFeedback"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
 
 class Task(Base):
@@ -339,3 +340,36 @@ class CalendarOutbox(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     user: Mapped["User"] = relationship(back_populates="calendar_outbox_items")
+
+
+class IntentProfile(Base):
+    __tablename__ = "intent_profiles"
+    __table_args__ = (UniqueConstraint("user_id", "profile_name", name="uq_intent_profile_user_name"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), index=True, nullable=True)
+    profile_name: Mapped[str] = mapped_column(String(64), index=True)
+    token_keywords_json: Mapped[str] = mapped_column(Text, default="[]")
+    phrase_keywords_json: Mapped[str] = mapped_column(Text, default="[]")
+    aliases_json: Mapped[str] = mapped_column(Text, default="[]")
+    threshold: Mapped[float] = mapped_column(Float, default=0.5)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class TrainingFeedback(Base):
+    __tablename__ = "training_feedback"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    session_id: Mapped[str] = mapped_column(String(64), index=True)
+    question: Mapped[str] = mapped_column(Text)
+    answer: Mapped[str] = mapped_column(Text)
+    expected_intent: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    predicted_intent: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    is_correct: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    user: Mapped["User"] = relationship(back_populates="training_feedback_items")
