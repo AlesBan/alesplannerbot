@@ -93,6 +93,12 @@ main.py
 
 - `docker compose up --build`
 
+Service-specific Dockerfiles are used for faster builds:
+
+- `Dockerfile.bot` + `requirements-bot.txt`
+- `Dockerfile.api` + `requirements-api.txt`
+- shared deps in `requirements-base.txt`
+
 ## Cloud Deploy (Supported Region)
 
 Use Render in `frankfurt` region to run bot/API from a supported location.
@@ -117,7 +123,7 @@ Use Render in `frankfurt` region to run bot/API from a supported location.
 
 This repository includes `.github/workflows/deploy-render.yml`:
 
-- Runs Python compile checks on every push to `main`
+- Runs fast Python compile checks on every push to `main` (no full pip install)
 - Detects changed paths
 - Triggers only the needed Render service deploy (`bot`, `api`, or both)
 

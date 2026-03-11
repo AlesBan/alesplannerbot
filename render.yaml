@@ -5,7 +5,7 @@ services:
     region: frankfurt
     plan: starter
     dockerContext: .
-    dockerfilePath: ./Dockerfile
+    dockerfilePath: ./Dockerfile.bot
     dockerCommand: python main.py
     autoDeploy: false
     envVars:
@@ -58,7 +58,7 @@ services:
     region: frankfurt
     plan: starter
     dockerContext: .
-    dockerfilePath: ./Dockerfile
+    dockerfilePath: ./Dockerfile.api
     dockerCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     autoDeploy: false
     healthCheckPath: /health

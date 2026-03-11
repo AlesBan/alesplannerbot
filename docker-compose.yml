@@ -2,7 +2,9 @@ version: "3.9"
 
 services:
   bot:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.bot
     env_file:
       - .env
     command: python main.py
@@ -11,7 +13,9 @@ services:
     restart: unless-stopped
 
   api:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.api
     env_file:
       - .env
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
