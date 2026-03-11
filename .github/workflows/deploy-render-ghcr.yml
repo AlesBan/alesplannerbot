@@ -17,6 +17,9 @@ jobs:
     env:
       RENDER_BOT_DEPLOY_HOOK: ${{ secrets.RENDER_BOT_DEPLOY_HOOK }}
       RENDER_API_DEPLOY_HOOK: ${{ secrets.RENDER_API_DEPLOY_HOOK }}
+      RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+      RENDER_BOT_SERVICE_ID: ${{ secrets.RENDER_BOT_SERVICE_ID }}
+      RENDER_API_SERVICE_ID: ${{ secrets.RENDER_API_SERVICE_ID }}
       GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
     steps:
       - name: Validate required secrets
@@ -39,8 +42,24 @@ jobs:
           if [[ "${RENDER_BOT_DEPLOY_HOOK}" == *\?* ]]; then
             separator="&"
           fi
+          hook_url="${RENDER_BOT_DEPLOY_HOOK}${separator}imgURL=${encoded_img}"
+          http_code="$(curl --silent --show-error --output /tmp/render_bot_hook_body.txt --write-out '%{http_code}' -X POST "$hook_url" || true)"
+          if [ "$http_code" = "200" ] || [ "$http_code" = "201" ]; then
+            echo "Bot image-backed deploy hook accepted (${http_code})."
+            exit 0
+          fi
+          echo "Bot deploy hook failed with HTTP ${http_code}; trying API deploy fallback."
+          if [ -z "${RENDER_API_KEY:-}" ] || [ -z "${RENDER_BOT_SERVICE_ID:-}" ]; then
+            echo "Fallback secrets missing (RENDER_API_KEY/RENDER_BOT_SERVICE_ID)."
+            echo "Hook response:"
+            cat /tmp/render_bot_hook_body.txt || true
+            exit 1
+          fi
           curl --fail --silent --show-error \
-            -X POST "${RENDER_BOT_DEPLOY_HOOK}${separator}imgURL=${encoded_img}"
+            -X POST "https://api.render.com/v1/services/${RENDER_BOT_SERVICE_ID}/deploys" \
+            -H "Authorization: Bearer ${RENDER_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d '{}'
 
       - name: Trigger api deploy from GHCR latest
         shell: bash
@@ -53,5 +72,21 @@ jobs:
           if [[ "${RENDER_API_DEPLOY_HOOK}" == *\?* ]]; then
             separator="&"
           fi
+          hook_url="${RENDER_API_DEPLOY_HOOK}${separator}imgURL=${encoded_img}"
+          http_code="$(curl --silent --show-error --output /tmp/render_api_hook_body.txt --write-out '%{http_code}' -X POST "$hook_url" || true)"
+          if [ "$http_code" = "200" ] || [ "$http_code" = "201" ]; then
+            echo "API image-backed deploy hook accepted (${http_code})."
+            exit 0
+          fi
+          echo "API deploy hook failed with HTTP ${http_code}; trying API deploy fallback."
+          if [ -z "${RENDER_API_KEY:-}" ] || [ -z "${RENDER_API_SERVICE_ID:-}" ]; then
+            echo "Fallback secrets missing (RENDER_API_KEY/RENDER_API_SERVICE_ID)."
+            echo "Hook response:"
+            cat /tmp/render_api_hook_body.txt || true
+            exit 1
+          fi
           curl --fail --silent --show-error \
-            -X POST "${RENDER_API_DEPLOY_HOOK}${separator}imgURL=${encoded_img}"
+            -X POST "https://api.render.com/v1/services/${RENDER_API_SERVICE_ID}/deploys" \
+            -H "Authorization: Bearer ${RENDER_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d '{}'
