@@ -13,7 +13,7 @@ from app.ai.context_engine import ContextEngine
 from app.ai.planner import AIPlanner
 from app.ai.recommendations import RecommendationEngine
 from app.database.db import SessionLocal
-from app.database.models import Activity, EnergyCost, Habit, Task, TaskStatus, TrainingFeedback, User
+from app.database.models import Activity, EnergyCost, Habit, Task, TaskStatus, TrainingFeedback, TrainingSession, User
 from app.integrations.google_calendar import GoogleCalendarService
 from app.integrations.openai_client import OpenAIClient
 from app.services.calendar_domain_service import CalendarDomainService
@@ -36,6 +36,15 @@ BACKLOG_PATH = Path("CHAT_IMPROVEMENT_BACKLOG.md")
 PROFILE_MATCHER = QueryProfileMatcher()
 TRAINING_QUIZ_STATE_KEY = "training_quiz_state"
 TRAINING_QUESTION_BANK_PATH = Path("training/question_bank.csv")
+TRAINING_FLOW_HELP_TEXT = (
+    "Флоу обучения:\n"
+    "1) /training_on 30 — запустить сессию вопросов (можно 10/30/50/100).\n"
+    "2) На каждом вопросе жми кнопку: Верно / Неверно.\n"
+    "3) /training_off — завершить сессию и запустить автоанализ.\n"
+    "4) /training_status или /training_report — посмотреть прогресс и отчет.\n"
+    "5) /training_analyze — вручную пересчитать анализ (если нужно).\n"
+    "6) /training_rollback — откатить последнее автообучение."
+)
 
 
 def _ensure_user(db, telegram_id: int, name: str) -> User:
@@ -179,24 +188,47 @@ def _send_training_quiz_item_text(state: dict, index: int) -> str | None:
     )
 
 
-def _apply_training_feedback(db, user_id: int) -> dict:
-    last = (
-        db.query(TrainingFeedback.session_id)
-        .filter(TrainingFeedback.user_id == user_id)
-        .order_by(TrainingFeedback.created_at.desc())
+def _mark_session_progress(db, user_id: int, session_id: str) -> None:
+    session = db.query(TrainingSession).filter(TrainingSession.user_id == user_id, TrainingSession.session_id == session_id).one_or_none()
+    if not session:
+        return
+    answered = db.query(TrainingFeedback).filter(
+        TrainingFeedback.user_id == user_id,
+        TrainingFeedback.session_id == session_id,
+    ).count()
+    session.answered_questions = answered
+    if session.total_questions > 0 and answered >= session.total_questions:
+        session.status = "completed"
+        session.ended_at = datetime.utcnow()
+    db.commit()
+
+
+def _latest_session(db, user_id: int) -> TrainingSession | None:
+    return (
+        db.query(TrainingSession)
+        .filter(TrainingSession.user_id == user_id)
+        .order_by(TrainingSession.created_at.desc())
         .first()
     )
-    if not last:
-        return {"ok": False, "reason": "no_session"}
-    session_id = last[0]
+
+
+def _apply_training_feedback(db, user_id: int, session_id: str | None = None) -> dict:
+    if not session_id:
+        latest = _latest_session(db, user_id)
+        if not latest:
+            return {"ok": False, "reason": "no_session"}
+        session_id = latest.session_id
     rows = db.query(TrainingFeedback).filter(
         TrainingFeedback.user_id == user_id,
         TrainingFeedback.session_id == session_id,
     ).all()
     if not rows:
         return {"ok": False, "reason": "empty_session", "session_id": session_id}
+    if len(rows) < 10:
+        return {"ok": False, "reason": "not_enough_samples", "session_id": session_id, "samples": len(rows)}
 
     service = IntentProfileService(db)
+    before_export = service.export_profiles(user_id)
     before = {p["name"]: float(p["threshold"]) for p in service.list_profiles(user_id)}
     added_count = 0
     tuned_profiles: set[str] = set()
@@ -230,7 +262,15 @@ def _apply_training_feedback(db, user_id: int) -> dict:
     total = len(rows)
     good = sum(1 for r in rows if r.is_correct)
     bad = total - good
-    return {
+    intent_pairs: dict[str, dict[str, int]] = {}
+    for row in rows:
+        expected = (row.expected_intent or "unknown").strip().lower() or "unknown"
+        predicted = (row.predicted_intent or "unknown").strip().lower() or "unknown"
+        if expected not in intent_pairs:
+            intent_pairs[expected] = {}
+        intent_pairs[expected][predicted] = intent_pairs[expected].get(predicted, 0) + 1
+
+    analysis = {
         "ok": True,
         "session_id": session_id,
         "total": total,
@@ -241,7 +281,76 @@ def _apply_training_feedback(db, user_id: int) -> dict:
         "tuned_profiles": sorted(tuned_profiles),
         "thresholds_before": before,
         "thresholds_after": after,
+        "intent_matrix": intent_pairs,
     }
+    after_export = service.export_profiles(user_id)
+    session = db.query(TrainingSession).filter(TrainingSession.user_id == user_id, TrainingSession.session_id == session_id).one_or_none()
+    if session:
+        session.analysis_json = json.dumps(analysis, ensure_ascii=False)
+        session.profiles_before_json = json.dumps(before_export, ensure_ascii=False)
+        session.profiles_after_json = json.dumps(after_export, ensure_ascii=False)
+        session.status = "analyzed"
+        session.ended_at = session.ended_at or datetime.utcnow()
+        db.commit()
+    return analysis
+
+
+def _rollback_last_training_apply(db, user_id: int) -> dict:
+    session = (
+        db.query(TrainingSession)
+        .filter(TrainingSession.user_id == user_id, TrainingSession.status == "analyzed", TrainingSession.profiles_before_json.is_not(None))
+        .order_by(TrainingSession.updated_at.desc())
+        .first()
+    )
+    if not session:
+        return {"ok": False, "reason": "no_analyzed_session"}
+    try:
+        profiles_before = json.loads(session.profiles_before_json or "[]")
+    except Exception:
+        return {"ok": False, "reason": "broken_snapshot"}
+    service = IntentProfileService(db)
+    service.replace_user_profiles(user_id, profiles_before if isinstance(profiles_before, list) else [])
+    session.status = "rolled_back"
+    db.commit()
+    return {"ok": True, "session_id": session.session_id, "restored_profiles": len(profiles_before)}
+
+
+def _training_report_text(db, user_id: int, session_id: str | None = None) -> str:
+    session = None
+    if session_id:
+        session = db.query(TrainingSession).filter(TrainingSession.user_id == user_id, TrainingSession.session_id == session_id).one_or_none()
+    else:
+        session = _latest_session(db, user_id)
+    if not session:
+        return "Пока нет сессий обучения."
+    answered = db.query(TrainingFeedback).filter(
+        TrainingFeedback.user_id == user_id,
+        TrainingFeedback.session_id == session.session_id,
+    ).count()
+    good = db.query(TrainingFeedback).filter(
+        TrainingFeedback.user_id == user_id,
+        TrainingFeedback.session_id == session.session_id,
+        TrainingFeedback.is_correct.is_(True),
+    ).count()
+    bad = answered - good
+    status = session.status
+    base = (
+        f"Сессия {session.session_id[:8]}...\n"
+        f"Статус: {status}\n"
+        f"Прогресс: {answered}/{session.total_questions}\n"
+        f"Верно: {good}\n"
+        f"Неверно: {bad}"
+    )
+    if session.analysis_json:
+        try:
+            analysis = json.loads(session.analysis_json)
+            base += f"\nДобавлено фраз: {int(analysis.get('added_phrases') or 0)}"
+            tuned = analysis.get("tuned_profiles") or []
+            if tuned:
+                base += f"\nТюнинг профилей: {', '.join(tuned)}"
+        except Exception:
+            pass
+    return base
 
 
 def _intent_add_phrase_command(text: str) -> tuple[str, str] | None:
@@ -796,6 +905,7 @@ async def training_quiz_callback_handler(callback: CallbackQuery) -> None:
         )
         db.add(feedback)
         db.commit()
+        _mark_session_progress(db, user.id, session_id)
 
         # Avoid duplicate rating on same message.
         if callback.message:
@@ -886,6 +996,17 @@ async def natural_chat_handler(message: Message) -> None:
                 "index": 0,
                 "items": items,
             }
+            db.add(
+                TrainingSession(
+                    user_id=user.id,
+                    session_id=state["session_id"],
+                    run_file_path=str(Path("eval_runs") / f"{state['session_id']}.json"),
+                    status="active",
+                    total_questions=len(items),
+                    answered_questions=0,
+                )
+            )
+            db.commit()
             _save_quiz_state(context, state)
             intro = (
                 f"Режим обучения включен. Запускаю сессию на {len(items)} вопросов.\n"
@@ -903,8 +1024,34 @@ async def natural_chat_handler(message: Message) -> None:
             return
         if training_cmd == "off":
             ks.set_training_enabled(False)
+            state = _load_quiz_state(context)
+            if state and state.get("session_id"):
+                sid = str(state.get("session_id"))
+                session = db.query(TrainingSession).filter(
+                    TrainingSession.user_id == user.id,
+                    TrainingSession.session_id == sid,
+                ).one_or_none()
+                if session:
+                    _mark_session_progress(db, user.id, sid)
+                    session.status = "completed"
+                    session.ended_at = session.ended_at or datetime.utcnow()
+                    db.commit()
             _clear_quiz_state(context)
-            reply = "Ок, режим обучения выключен. Сессию вопросов остановил."
+            applied = _apply_training_feedback(db, user.id, session_id=str(state.get("session_id")) if state else None)
+            if applied.get("ok"):
+                reply = (
+                    "Ок, режим обучения выключен.\n"
+                    f"Автоанализ выполнен: {applied['good']}/{applied['total']} верно, "
+                    f"добавлено фраз: {applied['added_phrases']}."
+                )
+            else:
+                if applied.get("reason") == "not_enough_samples":
+                    reply = (
+                        "Ок, режим обучения выключен.\n"
+                        f"Собрано {applied.get('samples')} ответов — для автоанализа нужно минимум 10."
+                    )
+                else:
+                    reply = "Ок, режим обучения выключен. Сессию вопросов остановил."
             await message.answer(reply)
             ks.add_turn(role="assistant", content=reply, intent="training_mode_off")
             return
@@ -994,35 +1141,18 @@ async def natural_chat_handler(message: Message) -> None:
             return
 
         if normalized_cmd in {"training_results", "результаты обучения", "статистика обучения"}:
-            last = (
-                db.query(TrainingFeedback.session_id)
-                .filter(TrainingFeedback.user_id == user.id)
-                .order_by(TrainingFeedback.created_at.desc())
-                .first()
-            )
-            if not last:
-                reply = "Пока нет оценок по кнопкам Верно/Неверно."
-            else:
-                session_id = last[0]
-                total = db.query(TrainingFeedback).filter(
-                    TrainingFeedback.user_id == user.id, TrainingFeedback.session_id == session_id
-                ).count()
-                good = db.query(TrainingFeedback).filter(
-                    TrainingFeedback.user_id == user.id,
-                    TrainingFeedback.session_id == session_id,
-                    TrainingFeedback.is_correct.is_(True),
-                ).count()
-                bad = total - good
-                reply = f"Последняя сессия {session_id[:8]}...\nИтого: {total}\nВерно: {good}\nНеверно: {bad}"
+            reply = _training_report_text(db, user.id)
             await message.answer(reply)
             ks.add_turn(role="assistant", content=reply, intent="training_results")
             return
 
-        if normalized_cmd in {"training_apply", "применить обучение", "примени обучение"}:
+        if normalized_cmd in {"training_analyze", "анализ обучения", "проанализируй обучение", "training_apply", "применить обучение", "примени обучение"}:
             applied = _apply_training_feedback(db, user.id)
             if not applied.get("ok"):
                 if applied.get("reason") == "no_session":
                     reply = "Пока нет завершенных сессий с кнопками Верно/Неверно. Сначала запусти /training_on."
+                elif applied.get("reason") == "not_enough_samples":
+                    reply = f"Для анализа пока мало данных: {applied.get('samples')} ответов. Нужно минимум 10."
                 else:
                     reply = "Сессию нашел, но в ней нет оценок."
                 await message.answer(reply)
@@ -1036,6 +1166,38 @@ async def natural_chat_handler(message: Message) -> None:
             )
             await message.answer(reply)
             ks.add_turn(role="assistant", content=reply, intent="training_apply")
+            return
+
+        if normalized_cmd in {"training_status", "статус обучения"}:
+            state = _load_quiz_state(context)
+            if state and state.get("active"):
+                idx = int(state.get("index") or 0)
+                total = len(state.get("items") or [])
+                reply = f"Сейчас активна сессия {str(state.get('session_id'))[:8]}...\nПрогресс: {idx}/{total}"
+            else:
+                latest = _latest_session(db, user.id)
+                if not latest:
+                    reply = "Сессия обучения сейчас не активна. Истории пока нет."
+                else:
+                    reply = _training_report_text(db, user.id, latest.session_id)
+            await message.answer(reply)
+            ks.add_turn(role="assistant", content=reply, intent="training_status")
+            return
+
+        if normalized_cmd in {"training_report", "отчет обучения"}:
+            reply = _training_report_text(db, user.id)
+            await message.answer(reply)
+            ks.add_turn(role="assistant", content=reply, intent="training_report")
+            return
+
+        if normalized_cmd in {"training_rollback", "откат обучения"}:
+            rb = _rollback_last_training_apply(db, user.id)
+            if rb.get("ok"):
+                reply = f"Откатил обучение по сессии {str(rb['session_id'])[:8]}... Восстановлено профилей: {rb['restored_profiles']}."
+            else:
+                reply = "Откат не выполнен: нет проанализированной сессии с сохраненным снимком."
+            await message.answer(reply)
+            ks.add_turn(role="assistant", content=reply, intent="training_rollback")
             return
 
         # Fast-path for latency-sensitive queries: skip LLM routing entirely.
@@ -1096,6 +1258,7 @@ async def natural_chat_handler(message: Message) -> None:
                     "capabilities": ["calendar_read_write", "yougile_sync", "task_planning", "habit_support"],
                 },
             ) or "Готов работать в формате чата и помогать с календарем, задачами и планированием."
+            reply = f"{reply}\n\n{TRAINING_FLOW_HELP_TEXT}"
             await message.answer(reply, reply_markup=_main_menu_keyboard())
             ks.add_turn(role="assistant", content="Sent welcome message", intent="welcome")
             return

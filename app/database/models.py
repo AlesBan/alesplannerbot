@@ -87,6 +87,7 @@ class User(Base):
     calendar_categories: Mapped[list["CalendarCategory"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     calendar_outbox_items: Mapped[list["CalendarOutbox"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     training_feedback_items: Mapped[list["TrainingFeedback"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    training_sessions: Mapped[list["TrainingSession"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
 
 class Task(Base):
@@ -373,3 +374,23 @@ class TrainingFeedback(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     user: Mapped["User"] = relationship(back_populates="training_feedback_items")
+
+
+class TrainingSession(Base):
+    __tablename__ = "training_sessions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    session_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    run_file_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="active")  # active|completed|analyzed|rolled_back
+    total_questions: Mapped[int] = mapped_column(Integer, default=0)
+    answered_questions: Mapped[int] = mapped_column(Integer, default=0)
+    analysis_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    profiles_before_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    profiles_after_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user: Mapped["User"] = relationship(back_populates="training_sessions")

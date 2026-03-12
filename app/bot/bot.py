@@ -31,7 +31,10 @@ async def _set_bot_commands(bot: Bot) -> None:
             BotCommand(command="training_show", description="Показать чему бот научился"),
             BotCommand(command="training_forget", description="Забыть последнее обучение"),
             BotCommand(command="training_results", description="Статистика сессии"),
-            BotCommand(command="training_apply", description="Применить обучение"),
+            BotCommand(command="training_analyze", description="Анализ и автообучение"),
+            BotCommand(command="training_status", description="Текущий статус обучения"),
+            BotCommand(command="training_report", description="Отчет последней сессии"),
+            BotCommand(command="training_rollback", description="Откат последнего автообучения"),
         ]
     )
 

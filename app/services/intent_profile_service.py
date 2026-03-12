@@ -157,6 +157,48 @@ class IntentProfileService:
             )
         return rows
 
+    def export_profiles(self, user_id: int | None = None) -> list[dict]:
+        profiles = sorted(self.get_profiles(user_id), key=lambda p: p.name)
+        return [
+            {
+                "name": p.name,
+                "threshold": float(p.threshold),
+                "enabled": True,
+                "token_keywords": sorted(list(p.token_keywords)),
+                "phrase_keywords": sorted(list(p.phrase_keywords)),
+                "aliases": sorted(list(p.aliases)),
+            }
+            for p in profiles
+        ]
+
+    def replace_user_profiles(self, user_id: int, profiles: list[dict]) -> None:
+        existing = list(self.db.scalars(select(IntentProfile).where(IntentProfile.user_id == user_id)))
+        for row in existing:
+            self.db.delete(row)
+        self.db.flush()
+
+        for item in profiles:
+            name = str(item.get("name") or "").strip().lower()
+            if not name:
+                continue
+            tokens = item.get("token_keywords") or []
+            phrases = item.get("phrase_keywords") or []
+            aliases = item.get("aliases") or []
+            threshold = float(item.get("threshold") or 0.5)
+            enabled = bool(item.get("enabled", True))
+            self.db.add(
+                IntentProfile(
+                    user_id=user_id,
+                    profile_name=name,
+                    token_keywords_json=json.dumps(tokens, ensure_ascii=False),
+                    phrase_keywords_json=json.dumps(phrases, ensure_ascii=False),
+                    aliases_json=json.dumps(aliases, ensure_ascii=False),
+                    threshold=threshold,
+                    enabled=enabled,
+                )
+            )
+        self.db.commit()
+
     def add_phrase(self, user_id: int, profile_name: str, phrase: str) -> bool:
         row = self._materialize_user_row(user_id=user_id, profile_name=profile_name)
         if not row:
