@@ -17,9 +17,11 @@ class Settings(BaseSettings):
     timezone: str = Field(default="UTC", alias="TIMEZONE")
 
     yougile_api_key: str = Field(default="", alias="YOU_GILE_API_KEY")
-    yougile_base_url: str = Field(default="https://api.yougile.com", alias="YOU_GILE_BASE_URL")
+    yougile_base_url: str = Field(default="https://ru.yougile.com/api-v2", alias="YOU_GILE_BASE_URL")
     yougile_email: str = Field(default="", alias="YOU_GILE_EMAIL")
     yougile_password: str = Field(default="", alias="YOU_GILE_PASSWORD")
+    yougile_company_name: str = Field(default="", alias="YOU_GILE_COMPANY_NAME")
+    yougile_company_id: str = Field(default="", alias="YOU_GILE_COMPANY_ID")
 
     google_calendar_id: str = Field(default="primary", alias="GOOGLE_CALENDAR_ID")
     google_credentials_path: str = Field(default="./credentials/google-credentials.json", alias="GOOGLE_CREDENTIALS_PATH")
