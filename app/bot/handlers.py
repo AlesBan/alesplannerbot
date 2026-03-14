@@ -1,6 +1,6 @@
 import json
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -792,7 +792,7 @@ def _build_local_day_label(timezone_name: str, day_offset: int = 0) -> str:
     return day.strftime("%d.%m.%Y")
 
 
-def _extract_requested_date(text: str, timezone_name: str) -> datetime.date | None:
+def _extract_requested_date(text: str, timezone_name: str) -> date | None:
     lower = (text or "").lower()
     try:
         tz = ZoneInfo(timezone_name)
