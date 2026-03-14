@@ -83,17 +83,23 @@ class YouGileService:
         for api_base in self._candidate_api_bases():
             with httpx.Client(base_url=api_base, timeout=20) as client:
                 try:
-                    companies_resp = client.post(
-                        "/auth/companies",
-                        json={
-                            "login": self.settings.yougile_email,
-                            "password": self.settings.yougile_password,
-                            "name": self.settings.yougile_company_name or "",
-                        },
-                    )
-                    if companies_resp.status_code >= 400:
-                        continue
-                    companies = self._extract_items(companies_resp.json())
+                    # First try filtered company lookup, then fallback to full list.
+                    requested_name = self.settings.yougile_company_name or ""
+                    companies: list[dict] = []
+                    for name_filter in (requested_name, ""):
+                        companies_resp = client.post(
+                            "/auth/companies",
+                            json={
+                                "login": self.settings.yougile_email,
+                                "password": self.settings.yougile_password,
+                                "name": name_filter,
+                            },
+                        )
+                        if companies_resp.status_code >= 400:
+                            continue
+                        companies = self._extract_items(companies_resp.json())
+                        if companies:
+                            break
                     company = self._pick_company(companies)
                     company_id = str((company or {}).get("id") or "").strip()
                     if not company_id:
