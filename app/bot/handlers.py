@@ -14,7 +14,7 @@ from app.ai.agent_orchestrator import AgentOrchestrator
 from app.ai.planner import AIPlanner
 from app.ai.recommendations import RecommendationEngine
 from app.database.db import SessionLocal
-from app.database.models import AgentRun, AgentStep, Activity, EnergyCost, Habit, Task, TaskStatus, TrainingFeedback, TrainingSession, User
+from app.database.models import AgentRun, AgentStep, Activity, EnergyCost, Habit, TrainingFeedback, TrainingSession, User
 from app.integrations.google_calendar import GoogleCalendarService
 from app.integrations.openai_client import OpenAIClient
 from app.services.calendar_domain_service import CalendarDomainService
@@ -881,10 +881,32 @@ def _looks_like_calendar_read_query(text: str) -> bool:
     read_markers = [
         "какие события",
         "что у меня",
+        "какие дела",
+        "дела на",
         "что по плану",
         "покажи события",
         "расписание",
         "планы",
+        "на следующий",
+        "следующий понедельник",
+        "следующий вторник",
+        "следующая среда",
+        "следующий четверг",
+        "следующая пятница",
+        "следующая суббота",
+        "следующее воскресенье",
+        "января",
+        "февраля",
+        "марта",
+        "апреля",
+        "мая",
+        "июня",
+        "июля",
+        "августа",
+        "сентября",
+        "октября",
+        "ноября",
+        "декабря",
         "events",
         "schedule",
         "what is on",
@@ -2104,15 +2126,23 @@ async def natural_chat_handler(message: Message) -> None:
             return
 
         if intent == ChatIntent.weekly_report:
-            tasks = TaskManager(db).list_open_tasks(user.id)
-            completed_count = db.query(Task).filter(Task.user_id == user.id, Task.status == TaskStatus.completed).count()
-            context = ContextEngine(db, user.id)
+            gcal = GoogleCalendarService()
+            calendar_tz = gcal.get_calendar_timezone() or user.timezone or settings.timezone
+            total_events = 0
+            total_hours = 0.0
+            for offset in range(7):
+                _, events = calendar_read.list_day_events(user.id, calendar_tz, offset)
+                total_events += len(events)
+                for event in events:
+                    start = getattr(event, "start_at", None)
+                    end = getattr(event, "end_at", None)
+                    if start and end:
+                        total_hours += max(0.0, (end - start).total_seconds() / 3600.0)
             reply = (
-                "Отчет за неделю:\n"
-                f"- Open/planned: {len(tasks)}\n"
-                f"- Completed: {completed_count}\n"
-                f"- Work hours: {context.get_memory('weekly_work_hours') or '0'}\n"
-                f"- Rest hours: {context.get_memory('weekly_rest_hours') or '0'}"
+                "Отчет за неделю (календарь):\n"
+                f"- Событий: {total_events}\n"
+                f"- Запланировано часов: {round(total_hours, 1)}\n"
+                f"- Источник: только календарь"
             )
             await message.answer(reply)
             ks.add_turn(role="assistant", content=reply, intent="weekly_report")
@@ -2120,16 +2150,12 @@ async def natural_chat_handler(message: Message) -> None:
             return
 
         if intent == ChatIntent.complete_task:
-            maybe_id = next((token for token in normalized_text.split() if token.isdigit()), None)
-            if maybe_id:
-                task = TaskManager(db).mark_completed(int(maybe_id))
-                reply = f"Отметил выполненной: {task.title}" if task else "Не нашел задачу с таким id."
-            else:
-                reply = "Напиши id задачи, например: 'выполнил задачу 12'"
+            reply = (
+                "Сейчас в чате отключен внутренний список задач. "
+                "Работаем через календарь: скажи, например, 'удали событие ...' или 'добавь ...'."
+            )
             await message.answer(reply)
             ks.add_turn(role="assistant", content=reply, intent="complete_task")
-            if "Не нашел задачу" in reply or "Напиши id задачи" in reply:
-                _append_chat_backlog_item(user.telegram_id, text, "task_id_fallback_triggered")
             ks.maybe_learn_from_dialogue(text, reply)
             return
 
