@@ -10,10 +10,11 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 from app.ai.chat_assistant import ChatAssistant, ChatIntent
 from app.ai.context_engine import ContextEngine
+from app.ai.agent_orchestrator import AgentOrchestrator
 from app.ai.planner import AIPlanner
 from app.ai.recommendations import RecommendationEngine
 from app.database.db import SessionLocal
-from app.database.models import Activity, EnergyCost, Habit, Task, TaskStatus, TrainingFeedback, TrainingSession, User
+from app.database.models import AgentRun, AgentStep, Activity, EnergyCost, Habit, Task, TaskStatus, TrainingFeedback, TrainingSession, User
 from app.integrations.google_calendar import GoogleCalendarService
 from app.integrations.openai_client import OpenAIClient
 from app.services.calendar_domain_service import CalendarDomainService
@@ -170,6 +171,113 @@ def _load_quiz_state(context: ContextEngine) -> dict | None:
 
 def _clear_quiz_state(context: ContextEngine) -> None:
     context.set_memory(TRAINING_QUIZ_STATE_KEY, "")
+
+
+def _save_pending_action(context: ContextEngine, action_type: str, payload: dict) -> None:
+    expires_at = datetime.utcnow() + timedelta(minutes=15)
+    body = {
+        "type": action_type,
+        "payload": payload,
+        "created_at": datetime.utcnow().isoformat(),
+        "expires_at": expires_at.isoformat(),
+    }
+    context.set_memory("pending_action", json.dumps(body, ensure_ascii=False))
+
+
+def _load_pending_action(context: ContextEngine) -> dict | None:
+    raw = context.get_memory("pending_action")
+    if not raw:
+        return None
+    try:
+        body = json.loads(raw)
+    except Exception:
+        return None
+    return body if isinstance(body, dict) else None
+
+
+def _clear_pending_action(context: ContextEngine) -> None:
+    context.set_memory("pending_action", "")
+
+
+def _pending_action_expired(pending: dict | None) -> bool:
+    if not pending:
+        return True
+    expires_at = str(pending.get("expires_at") or "").strip()
+    if not expires_at:
+        return False
+    try:
+        return datetime.utcnow() > datetime.fromisoformat(expires_at)
+    except Exception:
+        return False
+
+
+def _is_yes(text: str) -> bool:
+    lower = (text or "").strip().lower()
+    return lower in {"да", "ага", "ок", "окей", "подтверждаю", "yes", "y", "confirm"}
+
+
+def _is_no(text: str) -> bool:
+    lower = (text or "").strip().lower()
+    return lower in {"нет", "не", "отмена", "cancel", "no", "n", "stop", "стоп"}
+
+
+def _pending_confirm_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Подтвердить", callback_data="pact:yes"),
+                InlineKeyboardButton(text="❌ Отмена", callback_data="pact:no"),
+            ]
+        ]
+    )
+
+
+def _looks_like_confirmation_text(text: str) -> bool:
+    lower = (text or "").strip().lower()
+    return "подтверди" in lower and ("да / нет" in lower or "да/нет" in lower)
+
+
+def _load_conversation_state(context: ContextEngine) -> dict:
+    raw = context.get_memory("conversation_state")
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _save_conversation_state(context: ContextEngine, state: dict) -> None:
+    context.set_memory("conversation_state", json.dumps(state, ensure_ascii=False))
+
+
+def _set_last_intent(context: ContextEngine, intent: str, active_goal: str | None = None, pending_slots: list[str] | None = None) -> None:
+    state = _load_conversation_state(context)
+    state["last_intent"] = intent
+    if active_goal is not None:
+        state["active_goal"] = active_goal
+    if pending_slots is not None:
+        state["pending_slots"] = pending_slots
+    state["expires_at"] = (datetime.utcnow() + timedelta(minutes=30)).isoformat()
+    state["updated_at"] = datetime.utcnow().isoformat()
+    _save_conversation_state(context, state)
+
+
+def _looks_like_generic_follow_up(text: str) -> bool:
+    lower = (text or "").strip().lower()
+    return any(
+        token in lower
+        for token in [
+            "после этого",
+            "а потом",
+            "что дальше",
+            "что после",
+            "и дальше",
+            "дальше что",
+            "что идет после",
+        ]
+    )
 
 
 def _send_training_quiz_item_text(state: dict, index: int) -> str | None:
@@ -381,6 +489,118 @@ def _intent_set_threshold_command(text: str) -> tuple[str, float] | None:
     return profile, value
 
 
+def _agent_trace_limit(text: str, default_limit: int = 3) -> int:
+    lower = _normalize_command_text(text)
+    match = re.search(r"(?:agent_trace|трейс агента)\s+(\d+)", lower)
+    if not match:
+        return default_limit
+    try:
+        limit = int(match.group(1))
+    except Exception:
+        return default_limit
+    return max(1, min(10, limit))
+
+
+def _agent_trace_text(db, user_id: int, limit: int) -> str:
+    runs = (
+        db.query(AgentRun)
+        .filter(AgentRun.user_id == user_id)
+        .order_by(AgentRun.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    if not runs:
+        return "Пока нет trace запусков агента."
+
+    lines: list[str] = []
+    for run in runs:
+        lines.append(f"Run {run.run_id[:8]}... [{run.status}]")
+        lines.append(f"Q: {(run.user_message or '').strip()[:120]}")
+        steps = (
+            db.query(AgentStep)
+            .filter(AgentStep.run_id == run.id)
+            .order_by(AgentStep.step_no.asc())
+            .all()
+        )
+        if not steps:
+            lines.append("  - шагов нет")
+            if run.error:
+                lines.append(f"  - error: {run.error}")
+            lines.append("")
+            continue
+        for step in steps:
+            tool = "unknown"
+            result_hint = ""
+            try:
+                action = json.loads(step.action_json or "{}")
+                result = json.loads(step.result_json or "{}")
+                tool = str(action.get("tool") or "unknown")
+                if "error" in result:
+                    result_hint = f"error={result.get('error')}"
+                elif result.get("final"):
+                    result_hint = "final"
+                elif "count" in result:
+                    result_hint = f"count={result.get('count')}"
+                elif "ok" in result:
+                    result_hint = f"ok={result.get('ok')}"
+            except Exception:
+                pass
+            lines.append(f"  {step.step_no}) {tool}" + (f" ({result_hint})" if result_hint else ""))
+        if run.final_answer:
+            lines.append(f"A: {run.final_answer[:160]}")
+        if run.error:
+            lines.append(f"Error: {run.error}")
+        lines.append("")
+
+    return "\n".join(lines).strip()
+
+
+def _agent_trace_last_text(db, user_id: int) -> str:
+    run = (
+        db.query(AgentRun)
+        .filter(AgentRun.user_id == user_id)
+        .order_by(AgentRun.created_at.desc())
+        .first()
+    )
+    if not run:
+        return "Пока нет trace запусков агента."
+
+    steps = (
+        db.query(AgentStep)
+        .filter(AgentStep.run_id == run.id)
+        .order_by(AgentStep.step_no.asc())
+        .all()
+    )
+    payload: dict[str, Any] = {
+        "run_id": run.run_id,
+        "status": run.status,
+        "user_message": run.user_message,
+        "final_answer": run.final_answer,
+        "error": run.error,
+        "steps": [],
+    }
+    for step in steps:
+        action_obj: dict[str, Any] | str
+        result_obj: dict[str, Any] | str
+        try:
+            action_obj = json.loads(step.action_json or "{}")
+        except Exception:
+            action_obj = step.action_json or ""
+        try:
+            result_obj = json.loads(step.result_json or "{}")
+        except Exception:
+            result_obj = step.result_json or ""
+        payload["steps"].append(
+            {
+                "step_no": step.step_no,
+                "action": action_obj,
+                "result": result_obj,
+            }
+        )
+
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
 def _main_menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -572,6 +792,55 @@ def _build_local_day_label(timezone_name: str, day_offset: int = 0) -> str:
     return day.strftime("%d.%m.%Y")
 
 
+def _extract_requested_date(text: str, timezone_name: str) -> datetime.date | None:
+    lower = (text or "").lower()
+    try:
+        tz = ZoneInfo(timezone_name)
+    except Exception:
+        tz = ZoneInfo("UTC")
+    now_local = datetime.now(tz).date()
+    if "сегодня" in lower or "today" in lower:
+        return now_local
+    if "завтра" in lower or "tomorrow" in lower:
+        return now_local + timedelta(days=1)
+    if "послезавтра" in lower:
+        return now_local + timedelta(days=2)
+    if "вчера" in lower or "yesterday" in lower:
+        return now_local - timedelta(days=1)
+
+    m = re.search(r"\b(\d{2})\.(\d{2})\.(\d{4})\b", lower)
+    if m:
+        dd, mm, yyyy = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        try:
+            return datetime(yyyy, mm, dd).date()
+        except Exception:
+            return None
+    m_iso = re.search(r"\b(\d{4})-(\d{2})-(\d{2})\b", lower)
+    if m_iso:
+        yyyy, mm, dd = int(m_iso.group(1)), int(m_iso.group(2)), int(m_iso.group(3))
+        try:
+            return datetime(yyyy, mm, dd).date()
+        except Exception:
+            return None
+    return None
+
+
+def _ensure_local_calendar_window_2026_2030(
+    context: ContextEngine,
+    calendar_sync: CalendarSyncService,
+    user_id: int,
+    provider_calendar_id: str,
+) -> None:
+    key = "calendar_local_window_20260301_20301231"
+    if (context.get_memory(key) or "").strip() == "done":
+        return
+    start_utc = datetime(2026, 3, 1, 0, 0, tzinfo=timezone.utc)
+    end_utc = datetime(2030, 12, 31, 23, 59, tzinfo=timezone.utc)
+    imported = calendar_sync.import_range(user_id, provider_calendar_id, start_utc, end_utc)
+    if imported >= 0:
+        context.set_memory(key, "done")
+
+
 def _parse_hhmm(value: str | None) -> tuple[int, int] | None:
     if not value:
         return None
@@ -659,6 +928,29 @@ def _save_calendar_snapshot(context: ContextEngine, events: list, timezone_name:
     context.set_memory("last_calendar_snapshot", json.dumps(payload, ensure_ascii=False))
 
 
+def _save_last_calendar_focus_event(context: ContextEngine, event_row: dict, day_label: str) -> None:
+    payload = {
+        "date": day_label,
+        "index": event_row.get("index"),
+        "local_event_id": event_row.get("local_event_id"),
+        "title": event_row.get("title"),
+        "start": event_row.get("start"),
+        "end": event_row.get("end"),
+    }
+    context.set_memory("last_calendar_focus_event", json.dumps(payload, ensure_ascii=False))
+
+
+def _load_last_calendar_focus_event(context: ContextEngine) -> dict | None:
+    raw = context.get_memory("last_calendar_focus_event")
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 def _answer_calendar_follow_up(text: str, context: ContextEngine) -> str | None:
     raw = context.get_memory("last_calendar_snapshot")
     if not raw:
@@ -695,6 +987,7 @@ def _answer_calendar_follow_up(text: str, context: ContextEngine) -> str | None:
                     break
             if not anchor:
                 return None
+            _save_last_calendar_focus_event(context, anchor, day_label)
             pivot = anchor.get("end")
         tail = [row for row in events if row.get("start", "") >= (pivot or "00:00")]
         if not tail:
@@ -744,11 +1037,43 @@ def _delete_calendar_event_from_snapshot(
     match_by_index = re.search(r"(?:#|номер\s*|id\s*)(\d+)", lower)
     range_match = re.search(r"(\d{1,2}:\d{2})\s*[–-]\s*(\d{1,2}:\d{2})", text)
     title_hint = lower
-    for noise in ["удали", "удалить", "delete", "remove", "убери", "событие", "встречу", "встреча", "календарь", "из", "на", "-", "—"]:
+    for noise in [
+        "удали",
+        "удалить",
+        "delete",
+        "remove",
+        "убери",
+        "событие",
+        "встречу",
+        "встреча",
+        "календарь",
+        "из",
+        "на",
+        "его",
+        "её",
+        "ее",
+        "this",
+        "that",
+        "это",
+        "этот",
+        "эту",
+        "нужно",
+        "надо",
+        "-",
+        "—",
+    ]:
         title_hint = title_hint.replace(noise, " ")
     title_hint = " ".join(title_hint.split())
+    if len(title_hint) <= 1:
+        title_hint = ""
 
     candidates = events
+    # Resolve pronoun-style deletion ("удали его") from last focused calendar event.
+    implicit_ref = bool(re.search(r"\b(его|её|ее|this|that)\b", lower))
+    if implicit_ref and not match_by_index and not range_match and not title_hint:
+        focus = _load_last_calendar_focus_event(context)
+        if focus and focus.get("local_event_id"):
+            candidates = [row for row in events if int(row.get("local_event_id") or 0) == int(focus.get("local_event_id") or 0)]
     if match_by_index:
         idx = int(match_by_index.group(1))
         candidates = [row for row in events if int(row.get("index") or 0) == idx]
@@ -772,12 +1097,20 @@ def _delete_calendar_event_from_snapshot(
         return "Нашел несколько событий. Укажи номер, например: 'удали #13'\n" + rows
 
     target = candidates[0]
-    ok = calendar_domain.delete_local_event(user_id, int(target["local_event_id"]))
-    if not ok:
-        return "Не получилось удалить событие. Попробуй еще раз через пару секунд."
-    calendar_sync.sync_now(user_id, provider_calendar_id)
+    _save_last_calendar_focus_event(context, target, day_label)
+    _save_pending_action(
+        context,
+        "calendar_delete_confirm",
+        {
+            "local_event_id": int(target["local_event_id"]),
+            "title": target["title"],
+            "start": target["start"],
+            "end": target["end"],
+            "day_label": day_label,
+        },
+    )
     context.set_memory("pending_calendar_delete", "")
-    return f"Удалил событие: {target['start']}–{target['end']}  {target['title']} ({day_label})."
+    return f"Подтверди удаление: {target['start']}–{target['end']}  {target['title']} ({day_label}). Ответь: да / нет."
 
 
 def _try_resolve_pending_calendar_delete(
@@ -824,14 +1157,20 @@ def _try_resolve_pending_calendar_delete(
         rows = "\n".join([f"- #{row['index']} {row['start']}–{row['end']}  {row['title']}" for row in candidates[:8]])
         return "Не понял, какое именно удалить. Напиши номер:\n" + rows
 
-    local_event_id = int(selected.get("local_event_id") or 0)
-    ok = local_event_id > 0 and calendar_domain.delete_local_event(user_id, local_event_id)
-    if not ok:
-        return "Не получилось удалить выбранное событие. Попробуй еще раз."
-    calendar_sync.sync_now(user_id, provider_calendar_id)
+    _save_pending_action(
+        context,
+        "calendar_delete_confirm",
+        {
+            "local_event_id": int(selected.get("local_event_id") or 0),
+            "title": selected.get("title"),
+            "start": selected.get("start"),
+            "end": selected.get("end"),
+            "day_label": pending.get("day_label") or "выбранный день",
+        },
+    )
     context.set_memory("pending_calendar_delete", "")
     day_label = pending.get("day_label") or "выбранный день"
-    return f"Удалил событие: {selected['start']}–{selected['end']}  {selected['title']} ({day_label})."
+    return f"Подтверди удаление: {selected['start']}–{selected['end']}  {selected['title']} ({day_label}). Ответь: да / нет."
 
 
 class _TextProxyMessage:
@@ -849,6 +1188,102 @@ async def _handle_incoming_text(message: Message, text: str, source: str = "text
     _ = source
     proxy = _TextProxyMessage(message, text)
     await natural_chat_handler(proxy)  # Reuse the same orchestrated text pipeline.
+
+
+def _process_pending_action(
+    text: str,
+    context: ContextEngine,
+    calendar_domain: CalendarDomainService,
+    calendar_sync: CalendarSyncService,
+    user_id: int,
+    provider_calendar_id: str,
+) -> str | None:
+    pending = _load_pending_action(context)
+    if not pending:
+        return None
+    if _pending_action_expired(pending):
+        _clear_pending_action(context)
+        return "Срок подтверждения истек. Повтори запрос, и я выполню заново."
+
+    if _is_no(text):
+        _clear_pending_action(context)
+        return "Ок, действие отменил."
+    if not _is_yes(text):
+        return None
+
+    action_type = str(pending.get("type") or "")
+    payload = pending.get("payload") if isinstance(pending.get("payload"), dict) else {}
+
+    if action_type == "calendar_add_confirm":
+        try:
+            start_utc = datetime.fromisoformat(str(payload.get("start_utc")))
+            end_utc = datetime.fromisoformat(str(payload.get("end_utc")))
+        except Exception:
+            _clear_pending_action(context)
+            return "Не удалось разобрать время события. Повтори добавление."
+        title = str(payload.get("title") or "").strip() or "Новое событие"
+        tz_name = str(payload.get("timezone") or "UTC")
+        day_label = str(payload.get("day_label") or "")
+        calendar_domain.create_local_event(
+            user_id,
+            provider_calendar_id,
+            title,
+            start_utc,
+            end_utc,
+            tz_name,
+            details={"description": payload.get("description"), "location": payload.get("location")},
+        )
+        push = calendar_sync.push_outbox(user_id, provider_calendar_id)
+        _clear_pending_action(context)
+        return (
+            f"Готово. Добавил в календарь: {title}"
+            + (f" ({day_label})" if day_label else "")
+            + f". [sync pushed={push.get('pushed', 0)}, failed={push.get('failed', 0)}]"
+        )
+
+    if action_type == "calendar_delete_confirm":
+        local_event_id = int(payload.get("local_event_id") or 0)
+        title = str(payload.get("title") or "событие")
+        start = str(payload.get("start") or "")
+        end = str(payload.get("end") or "")
+        day_label = str(payload.get("day_label") or "")
+        ok = local_event_id > 0 and calendar_domain.delete_local_event(user_id, local_event_id)
+        if not ok:
+            _clear_pending_action(context)
+            return "Не получилось удалить событие. Повтори попытку."
+        push = calendar_sync.push_outbox(user_id, provider_calendar_id)
+        _clear_pending_action(context)
+        return (
+            f"Удалил событие: {start}–{end} {title}" + (f" ({day_label})" if day_label else "") + ". "
+            f"[sync pushed={push.get('pushed', 0)}, failed={push.get('failed', 0)}]"
+        )
+
+    if action_type == "calendar_update_confirm":
+        local_event_id = int(payload.get("local_event_id") or 0)
+        title = str(payload.get("title") or "событие")
+        try:
+            new_start_utc = datetime.fromisoformat(str(payload.get("new_start_utc")))
+            new_end_utc = datetime.fromisoformat(str(payload.get("new_end_utc")))
+        except Exception:
+            _clear_pending_action(context)
+            return "Не удалось разобрать новое время. Повтори перенос."
+        ok = calendar_domain.update_local_event(
+            user_id,
+            local_event_id,
+            {"start_at": new_start_utc, "end_at": new_end_utc},
+        )
+        if not ok:
+            _clear_pending_action(context)
+            return "Не получилось перенести событие. Повтори попытку."
+        push = calendar_sync.push_outbox(user_id, provider_calendar_id)
+        _clear_pending_action(context)
+        return (
+            f"Перенес событие: {title} на {payload.get('new_start')}–{payload.get('new_end')}. "
+            f"[sync pushed={push.get('pushed', 0)}, failed={push.get('failed', 0)}]"
+        )
+
+    _clear_pending_action(context)
+    return "Неизвестный тип ожидающего действия. Повтори запрос."
 
 
 @router.callback_query(F.data.startswith("quiz:"))
@@ -950,6 +1385,43 @@ async def training_quiz_callback_handler(callback: CallbackQuery) -> None:
             ks.add_turn(role="assistant", content=text, intent="training_quiz_question")
 
 
+@router.callback_query(F.data.startswith("pact:"))
+async def pending_action_callback_handler(callback: CallbackQuery) -> None:
+    raw = (callback.data or "").strip().lower()
+    decision = "yes" if raw.endswith(":yes") else "no"
+    if not callback.from_user:
+        await callback.answer("Пользователь не найден.", show_alert=False)
+        return
+    with SessionLocal() as db:
+        user = _ensure_user(db, callback.from_user.id, callback.from_user.full_name if callback.from_user else "User")
+        ks = KnowledgeService(db, user.id)
+        context = ContextEngine(db, user.id)
+        calendar_domain = CalendarDomainService(db)
+        calendar_sync = CalendarSyncService(db)
+        provider_calendar_id = settings.google_calendar_id
+        reply = _process_pending_action(
+            "да" if decision == "yes" else "нет",
+            context,
+            calendar_domain,
+            calendar_sync,
+            user.id,
+            provider_calendar_id,
+        )
+        if not reply:
+            await callback.answer("Нет ожидающего действия для подтверждения.", show_alert=False)
+            return
+        if callback.message:
+            try:
+                await callback.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            await callback.message.answer(reply)
+        else:
+            await callback.bot.send_message(callback.from_user.id, reply)
+        await callback.answer("Принято.", show_alert=False)
+        ks.add_turn(role="assistant", content=reply, intent="pending_action_result")
+
+
 @router.message(F.text)
 async def natural_chat_handler(message: Message) -> None:
     text = (message.text or "").strip()
@@ -967,12 +1439,96 @@ async def natural_chat_handler(message: Message) -> None:
         intent_profiles = intent_profile_service.get_profiles(user.id)
         ks.add_turn(role="user", content=text, intent="incoming")
         ks.learn_from_message(text)
+        is_slash_command = text.startswith("/")
         normalized_cmd = _normalize_command_text(text)
         cmd_profile, _cmd_profile_score = PROFILE_MATCHER.classify(
             normalized_cmd,
             intent_profiles,
             candidates=("current_focus", "bedtime"),
         )
+
+        if is_slash_command and normalized_cmd == "start":
+            ContextEngine(db, user.id).set_memory("weekly_work_hours", "0")
+            ContextEngine(db, user.id).set_memory("weekly_rest_hours", "0")
+            reply = ks.reply_with_backend_result(
+                text,
+                operation="welcome",
+                payload={
+                    "mode": "chat_first",
+                    "capabilities": ["calendar_read_write", "yougile_sync", "task_planning", "habit_support"],
+                },
+            ) or "Готов работать в формате чата и помогать с календарем, задачами и планированием."
+            reply = f"{reply}\n\n{TRAINING_FLOW_HELP_TEXT}"
+            await message.answer(reply, reply_markup=_main_menu_keyboard())
+            ks.add_turn(role="assistant", content="Sent welcome message", intent="welcome")
+            return
+
+        if normalized_cmd in {"agent_trace", "трейс агента"} or normalized_cmd.startswith(("agent_trace ", "трейс агента ")):
+            limit = _agent_trace_limit(text, default_limit=3)
+            reply = _agent_trace_text(db, user.id, limit)
+            await message.answer(reply)
+            ks.add_turn(role="assistant", content=reply, intent="agent_trace")
+            return
+        if normalized_cmd in {"agent_trace_last", "последний трейс агента"}:
+            reply = _agent_trace_last_text(db, user.id)
+            await message.answer(reply)
+            ks.add_turn(role="assistant", content=reply, intent="agent_trace_last")
+            return
+
+        pending_action = _load_pending_action(context)
+        if pending_action and _pending_action_expired(pending_action):
+            _clear_pending_action(context)
+            pending_action = None
+
+        processed_pending = _process_pending_action(
+            text,
+            context,
+            calendar_domain,
+            calendar_sync,
+            user.id,
+            provider_calendar_id,
+        )
+        if processed_pending:
+            await message.answer(processed_pending)
+            ks.add_turn(role="assistant", content=processed_pending, intent="pending_action_result")
+            _set_last_intent(context, "pending_action_result")
+            return
+
+        if pending_action and pending_action.get("type") == "calendar_add_collect":
+            if normalized_cmd in {"отмена", "cancel", "не надо", "стоп"}:
+                _clear_pending_action(context)
+                reply = "Ок, отменил добавление события."
+                await message.answer(reply)
+                ks.add_turn(role="assistant", content=reply, intent="pending_action_cancel")
+                _set_last_intent(context, "pending_action_cancel")
+                return
+            payload = pending_action.get("payload") if isinstance(pending_action.get("payload"), dict) else {}
+            calendar_tz = str(payload.get("timezone") or (context.get_memory("calendar_timezone") or user.timezone or settings.timezone))
+            merged_text = f"{payload.get('seed_text') or ''} {text}".strip()
+            resolved = _resolve_calendar_add_params(merged_text, {}, calendar_tz)
+            if resolved:
+                _save_pending_action(
+                    context,
+                    "calendar_add_confirm",
+                    {
+                        "title": resolved["title"],
+                        "start_utc": resolved["start_local"].astimezone(timezone.utc).replace(tzinfo=None).isoformat(),
+                        "end_utc": resolved["end_local"].astimezone(timezone.utc).replace(tzinfo=None).isoformat(),
+                        "timezone": calendar_tz,
+                        "day_label": resolved["day_label"],
+                        "description": None,
+                        "location": None,
+                    },
+                )
+                reply = (
+                    f"Подтверди добавление: "
+                    f"{resolved['start_local'].strftime('%H:%M')}–{resolved['end_local'].strftime('%H:%M')} "
+                    f"{resolved['title']} ({resolved['day_label']}). Ответь: да / нет."
+                )
+                await message.answer(reply, reply_markup=_pending_confirm_keyboard())
+                ks.add_turn(role="assistant", content=reply, intent="calendar_add_confirm")
+                _set_last_intent(context, "calendar_add_confirm", active_goal="calendar_add", pending_slots=[])
+                return
 
         training_cmd = _training_mode_command(text)
         if training_cmd == "on":
@@ -1212,8 +1768,12 @@ async def natural_chat_handler(message: Message) -> None:
 
         if normalized_cmd in {"today", "покажи события на сегодня"}:
             calendar_tz = context.get_memory("calendar_timezone") or user.timezone or settings.timezone
-            day_label = _build_local_day_label(calendar_tz)
-            _, events = calendar_read.list_day_events(user.id, calendar_tz, 0)
+            try:
+                tz_for_today = ZoneInfo(calendar_tz)
+            except Exception:
+                tz_for_today = ZoneInfo("UTC")
+            requested_date = _extract_requested_date(text, calendar_tz) or datetime.now(tz_for_today).date()
+            day_label, events = calendar_read.list_date_events(user.id, calendar_tz, requested_date)
             if events:
                 rows = _format_calendar_events(events, calendar_tz, max_items=None)
                 reply = f"События на {day_label}:\n{rows}"
@@ -1234,9 +1794,51 @@ async def natural_chat_handler(message: Message) -> None:
                 reply = "Принял. Чтобы обучить точно, напиши: 'я ожидал: <как нужно отвечать>'."
             await message.answer(reply)
             ks.add_turn(role="assistant", content=reply, intent="teacher_feedback")
+            _set_last_intent(context, "teacher_feedback")
             return
 
-        route = chat_assistant.route_message(text)
+        if _looks_like_generic_follow_up(text):
+            conv_state = _load_conversation_state(context)
+            expires_at = str(conv_state.get("expires_at") or "")
+            if expires_at:
+                try:
+                    if datetime.utcnow() > datetime.fromisoformat(expires_at):
+                        conv_state = {}
+                except Exception:
+                    pass
+            last_intent = str(conv_state.get("last_intent") or "")
+            if last_intent in {"calendar_check", "current_focus", "calendar_follow_up"}:
+                follow_up = _answer_calendar_follow_up(text, context)
+                if follow_up:
+                    await message.answer(follow_up)
+                    ks.add_turn(role="assistant", content=follow_up, intent="calendar_follow_up")
+                    _set_last_intent(context, "calendar_follow_up")
+                    return
+
+        pre_route = chat_assistant.route_message(text)
+        pre_intent = pre_route["intent"]
+
+        # Agentic loop only for ambiguous/non-deterministic intents.
+        pending_delete_exists = bool((context.get_memory("pending_calendar_delete") or "").strip())
+        if (
+            (not is_slash_command)
+            and training_cmd is None
+            and (not pending_delete_exists)
+            and normalized_cmd not in {"now", "today", "покажи события на сегодня"}
+            and pre_intent in {ChatIntent.general_chat, ChatIntent.connections_check, ChatIntent.calendar_modify_help}
+        ):
+            agent_reply = AgentOrchestrator(db, user.id).run(text, provider_calendar_id=provider_calendar_id)
+            if agent_reply:
+                if _looks_like_confirmation_text(agent_reply):
+                    await message.answer(agent_reply, reply_markup=_pending_confirm_keyboard())
+                else:
+                    await message.answer(agent_reply)
+                ks.add_turn(role="assistant", content=agent_reply, intent="agent_orchestrator")
+                ks.maybe_learn_from_dialogue(text, agent_reply)
+                _set_last_intent(context, "agent_orchestrator")
+                return
+
+        route = pre_route
         intent = route["intent"]
         normalized_text = route["normalized_text"]
         response_mode = route["response_mode"]
@@ -1247,27 +1849,17 @@ async def natural_chat_handler(message: Message) -> None:
             candidates=("current_focus", "bedtime"),
         )
 
-        if text.lower() == "/start":
-            ContextEngine(db, user.id).set_memory("weekly_work_hours", "0")
-            ContextEngine(db, user.id).set_memory("weekly_rest_hours", "0")
-            reply = ks.reply_with_backend_result(
-                text,
-                operation="welcome",
-                payload={
-                    "mode": "chat_first",
-                    "capabilities": ["calendar_read_write", "yougile_sync", "task_planning", "habit_support"],
-                },
-            ) or "Готов работать в формате чата и помогать с календарем, задачами и планированием."
-            reply = f"{reply}\n\n{TRAINING_FLOW_HELP_TEXT}"
-            await message.answer(reply, reply_markup=_main_menu_keyboard())
-            ks.add_turn(role="assistant", content="Sent welcome message", intent="welcome")
-            return
-
         if intent == ChatIntent.calendar_add or intent == ChatIntent.add_task:
             gcal = GoogleCalendarService()
             calendar_tz = gcal.get_calendar_timezone() or user.timezone or settings.timezone
             payload = _resolve_calendar_add_params(normalized_text, params, calendar_tz)
             if not payload:
+                _save_pending_action(
+                    context,
+                    "calendar_add_collect",
+                    {"seed_text": normalized_text, "timezone": calendar_tz},
+                )
+                _set_last_intent(context, "calendar_add_collect", active_goal="calendar_add", pending_slots=["time_range", "title"])
                 reply = ks.reply_with_backend_result(
                     text,
                     operation="calendar_add_need_details",
@@ -1277,26 +1869,27 @@ async def natural_chat_handler(message: Message) -> None:
                 ks.add_turn(role="assistant", content=reply, intent="calendar_add")
                 return
 
-            calendar_domain.create_local_event(
-                user.id,
-                provider_calendar_id,
-                payload["title"],
-                payload["start_local"].astimezone(timezone.utc).replace(tzinfo=None),
-                payload["end_local"].astimezone(timezone.utc).replace(tzinfo=None),
-                calendar_tz,
-                details={"description": params.get("description"), "location": params.get("location")},
+            _save_pending_action(
+                context,
+                "calendar_add_confirm",
+                {
+                    "title": payload["title"],
+                    "start_utc": payload["start_local"].astimezone(timezone.utc).replace(tzinfo=None).isoformat(),
+                    "end_utc": payload["end_local"].astimezone(timezone.utc).replace(tzinfo=None).isoformat(),
+                    "timezone": calendar_tz,
+                    "day_label": payload["day_label"],
+                    "description": params.get("description"),
+                    "location": params.get("location"),
+                },
             )
-            calendar_sync.sync_now(user.id, provider_calendar_id)
-            _, refreshed = calendar_read.list_day_events(user.id, calendar_tz, 0)
-            _save_calendar_snapshot(context, refreshed, calendar_tz, payload["day_label"])
-            # Deterministic factual confirmation for critical write action.
             reply = (
-                f"Готово. Добавил в календарь: "
+                f"Подтверди добавление: "
                 f"{payload['start_local'].strftime('%H:%M')}–{payload['end_local'].strftime('%H:%M')} "
-                f"{payload['title']} ({payload['day_label']})."
+                f"{payload['title']} ({payload['day_label']}). Ответь: да / нет."
             )
-            await message.answer(reply)
-            ks.add_turn(role="assistant", content=reply, intent="calendar_add")
+            await message.answer(reply, reply_markup=_pending_confirm_keyboard())
+            ks.add_turn(role="assistant", content=reply, intent="calendar_add_confirm")
+            _set_last_intent(context, "calendar_add_confirm", active_goal="calendar_add", pending_slots=[])
             return
 
         if intent == ChatIntent.calendar_delete:
@@ -1308,8 +1901,12 @@ async def natural_chat_handler(message: Message) -> None:
                 user.id,
                 provider_calendar_id,
             )
-            await message.answer(reply)
+            if _looks_like_confirmation_text(reply):
+                await message.answer(reply, reply_markup=_pending_confirm_keyboard())
+            else:
+                await message.answer(reply)
             ks.add_turn(role="assistant", content=reply, intent="calendar_delete")
+            _set_last_intent(context, "calendar_delete")
             if "Не нашел событие" in reply or "Не получилось" in reply:
                 _append_chat_backlog_item(user.telegram_id, text, "calendar_delete_matching_or_api_error")
             # Refresh snapshot after successful deletion.
@@ -1331,8 +1928,12 @@ async def natural_chat_handler(message: Message) -> None:
             )
             if not pending_reply:
                 pending_reply = "Уточни, какое событие удалить: например 'удали #13' или 'отмена'."
-            await message.answer(pending_reply)
+            if _looks_like_confirmation_text(pending_reply):
+                await message.answer(pending_reply, reply_markup=_pending_confirm_keyboard())
+            else:
+                await message.answer(pending_reply)
             ks.add_turn(role="assistant", content=pending_reply, intent="calendar_delete_pending")
+            _set_last_intent(context, "calendar_delete_pending")
             if pending_reply.startswith("Удалил событие:"):
                 calendar_tz = GoogleCalendarService().get_calendar_timezone() or user.timezone or settings.timezone
                 day_label = _build_local_day_label(calendar_tz)
@@ -1346,6 +1947,7 @@ async def natural_chat_handler(message: Message) -> None:
                 follow_up = "Уточни вопрос по последнему списку календаря, и я отвечу точечно."
             await message.answer(follow_up)
             ks.add_turn(role="assistant", content=follow_up, intent="calendar_follow_up")
+            _set_last_intent(context, "calendar_follow_up")
             return
 
         if intent == ChatIntent.calendar_modify_help:
@@ -1360,17 +1962,26 @@ async def natural_chat_handler(message: Message) -> None:
             ) or "Могу менять календарь: удалять, переносить и добавлять события."
             await message.answer(reply)
             ks.add_turn(role="assistant", content=reply, intent="calendar_modify_help")
+            _set_last_intent(context, "calendar_modify_help")
             return
         if intent == ChatIntent.plan_day:
             # Local-first: read from local calendar store, sync with Google as secondary path.
             gcal = GoogleCalendarService()
             calendar_tz = gcal.get_calendar_timezone() or user.timezone or settings.timezone
-            day_label = _build_local_day_label(calendar_tz)
-            _, events = calendar_read.list_day_events(user.id, calendar_tz, 0)
+            requested_date = _extract_requested_date(normalized_text or text, calendar_tz)
+            if requested_date:
+                day_label, events = calendar_read.list_date_events(user.id, calendar_tz, requested_date)
+            else:
+                day_label = _build_local_day_label(calendar_tz)
+                _, events = calendar_read.list_day_events(user.id, calendar_tz, 0)
             if not events:
                 # Fallback sync when local cache is empty.
+                _ensure_local_calendar_window_2026_2030(context, calendar_sync, user.id, provider_calendar_id)
                 calendar_sync.pull_incremental(user.id, provider_calendar_id)
-                _, events = calendar_read.list_day_events(user.id, calendar_tz, 0)
+                if requested_date:
+                    day_label, events = calendar_read.list_date_events(user.id, calendar_tz, requested_date)
+                else:
+                    _, events = calendar_read.list_day_events(user.id, calendar_tz, 0)
             if events:
                 rows = _format_calendar_events(events, calendar_tz, max_items=None)
                 reply = ks.reply_with_backend_result(
@@ -1388,6 +1999,7 @@ async def natural_chat_handler(message: Message) -> None:
             await message.answer(reply)
             ks.add_turn(role="assistant", content=reply, intent="plan_day")
             ks.maybe_learn_from_dialogue(text, reply)
+            _set_last_intent(context, "plan_day")
             return
 
         if intent == ChatIntent.suggest_free:
@@ -1480,17 +2092,26 @@ async def natural_chat_handler(message: Message) -> None:
             await message.answer(reply)
             ks.add_turn(role="assistant", content=reply, intent="connections_check")
             ks.maybe_learn_from_dialogue(text, reply)
+            _set_last_intent(context, "connections_check")
             return
 
         if intent == ChatIntent.calendar_check:
             gcal = GoogleCalendarService()
             calendar_tz = gcal.get_calendar_timezone() or user.timezone or settings.timezone
-            day_label = _build_local_day_label(calendar_tz)
-            _, events = calendar_read.list_day_events(user.id, calendar_tz, 0)
+            requested_date = _extract_requested_date(normalized_text or text, calendar_tz)
+            if requested_date:
+                day_label, events = calendar_read.list_date_events(user.id, calendar_tz, requested_date)
+            else:
+                day_label = _build_local_day_label(calendar_tz)
+                _, events = calendar_read.list_day_events(user.id, calendar_tz, 0)
             if not events:
                 # Fallback sync when local cache is empty.
+                _ensure_local_calendar_window_2026_2030(context, calendar_sync, user.id, provider_calendar_id)
                 calendar_sync.pull_incremental(user.id, provider_calendar_id)
-                _, events = calendar_read.list_day_events(user.id, calendar_tz, 0)
+                if requested_date:
+                    day_label, events = calendar_read.list_date_events(user.id, calendar_tz, requested_date)
+                else:
+                    _, events = calendar_read.list_day_events(user.id, calendar_tz, 0)
             if events:
                 is_exact = response_mode == "calendar_exact"
                 rows = _format_calendar_events(events, calendar_tz, max_items=None if is_exact else 20)
@@ -1513,6 +2134,7 @@ async def natural_chat_handler(message: Message) -> None:
                 ) or "На сегодня в календаре событий не найдено."
             await message.answer(reply)
             ks.add_turn(role="assistant", content=reply, intent="calendar_check")
+            _set_last_intent(context, "calendar_check")
             return
 
         if intent == ChatIntent.current_focus or routed_profile == "current_focus":
@@ -1530,6 +2152,7 @@ async def natural_chat_handler(message: Message) -> None:
                 await message.answer(reply)
                 ks.add_turn(role="assistant", content=reply, intent="current_focus")
                 ks.maybe_learn_from_dialogue(text, reply)
+                _set_last_intent(context, "current_focus")
                 return
             # For "bedtime" style questions use deterministic rule from calendar.
             if routed_profile == "bedtime":
@@ -1539,11 +2162,13 @@ async def natural_chat_handler(message: Message) -> None:
                     await message.answer(reply)
                     ks.add_turn(role="assistant", content=reply, intent="current_focus")
                     ks.maybe_learn_from_dialogue(text, reply)
+                    _set_last_intent(context, "current_focus")
                     return
             reply = _format_current_focus(events, calendar_tz)
             await message.answer(reply)
             ks.add_turn(role="assistant", content=reply, intent="current_focus")
             ks.maybe_learn_from_dialogue(text, reply)
+            _set_last_intent(context, "current_focus")
             return
 
         taught = ks.find_taught_answer(normalized_text)
@@ -1556,3 +2181,4 @@ async def natural_chat_handler(message: Message) -> None:
         await message.answer(reply)
         ks.add_turn(role="assistant", content=reply, intent="general_chat")
         ks.maybe_learn_from_dialogue(text, reply)
+        _set_last_intent(context, "general_chat")

@@ -14,7 +14,7 @@ class ContextEngine:
         memory = self.db.scalar(stmt)
         return memory.value if memory else None
 
-    def set_memory(self, key: str, value: str) -> UserMemory:
+    def set_memory(self, key: str, value: str, commit: bool = True) -> UserMemory:
         stmt = select(UserMemory).where(UserMemory.user_id == self.user_id, UserMemory.key == key)
         memory = self.db.scalar(stmt)
         if memory:
@@ -22,8 +22,11 @@ class ContextEngine:
         else:
             memory = UserMemory(user_id=self.user_id, key=key, value=value)
             self.db.add(memory)
-        self.db.commit()
-        self.db.refresh(memory)
+        if commit:
+            self.db.commit()
+            self.db.refresh(memory)
+        else:
+            self.db.flush()
         return memory
 
     def export_memory(self) -> dict[str, str]:

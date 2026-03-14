@@ -23,13 +23,31 @@ class CalendarReadService:
         day_end_local = day_start_local + timedelta(days=1)
         return day_start_local.astimezone(timezone.utc).replace(tzinfo=None), day_end_local.astimezone(timezone.utc).replace(tzinfo=None)
 
-    def list_day_events(self, user_id: int, timezone_name: str, day_offset: int = 0) -> tuple[str, list[CalendarEvent]]:
-        day_start, day_end = self.build_day_window_utc(timezone_name, day_offset)
+    @staticmethod
+    def build_date_window_utc(timezone_name: str, target_date: datetime.date) -> tuple[datetime, datetime]:
         try:
             tz = ZoneInfo(timezone_name)
         except Exception:
             tz = ZoneInfo("UTC")
-        day_label = datetime.now(tz).date() + timedelta(days=day_offset)
+        day_start_local = datetime.combine(target_date, datetime.min.time(), tzinfo=tz)
+        day_end_local = day_start_local + timedelta(days=1)
+        return day_start_local.astimezone(timezone.utc).replace(tzinfo=None), day_end_local.astimezone(timezone.utc).replace(tzinfo=None)
+
+    def list_day_events(self, user_id: int, timezone_name: str, day_offset: int = 0) -> tuple[str, list[CalendarEvent]]:
+        try:
+            tz = ZoneInfo(timezone_name)
+        except Exception:
+            tz = ZoneInfo("UTC")
+        target_date = datetime.now(tz).date() + timedelta(days=day_offset)
+        return self.list_date_events(user_id, timezone_name, target_date)
+
+    def list_date_events(self, user_id: int, timezone_name: str, target_date: datetime.date) -> tuple[str, list[CalendarEvent]]:
+        day_start, day_end = self.build_date_window_utc(timezone_name, target_date)
+        try:
+            tz = ZoneInfo(timezone_name)
+        except Exception:
+            tz = ZoneInfo("UTC")
+        day_label = target_date
         rows = (
             self.db.query(CalendarEvent)
             .filter(

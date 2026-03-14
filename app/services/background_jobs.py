@@ -1,4 +1,6 @@
 from datetime import datetime
+import logging
+from zoneinfo import ZoneInfo
 
 from aiogram import Bot
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -15,10 +17,14 @@ class BackgroundJobs:
     def __init__(self, bot: Bot) -> None:
         self.bot = bot
         self.settings = get_settings()
-        self.scheduler = AsyncIOScheduler(timezone=self.settings.timezone)
+        self.scheduler = AsyncIOScheduler(
+            timezone=self.settings.timezone,
+            job_defaults={"coalesce": True, "max_instances": 1, "misfire_grace_time": 300},
+        )
+        self.logger = logging.getLogger(__name__)
 
     async def _morning_plan_job(self) -> None:
-        now = datetime.now()
+        now = datetime.now(ZoneInfo(self.settings.timezone))
         if now.hour != self.settings.morning_plan_hour:
             return
         with SessionLocal() as db:
@@ -28,7 +34,7 @@ class BackgroundJobs:
                 await notifier.send_morning_plan(user)
 
     async def _evening_review_job(self) -> None:
-        now = datetime.now()
+        now = datetime.now(ZoneInfo(self.settings.timezone))
         if now.hour != self.settings.evening_review_hour:
             return
         with SessionLocal() as db:
@@ -53,7 +59,7 @@ class BackgroundJobs:
                 try:
                     sync.pull_incremental(user.id, calendar_id)
                 except Exception:
-                    # Keep scheduler alive for other users/jobs.
+                    self.logger.exception("Incremental calendar sync failed for user_id=%s", user.id)
                     continue
 
     async def _calendar_weekly_full_sync_job(self) -> None:
@@ -65,6 +71,7 @@ class BackgroundJobs:
                 try:
                     sync.import_full_window(user.id, calendar_id, years_back=3, years_forward=5)
                 except Exception:
+                    self.logger.exception("Weekly full calendar sync failed for user_id=%s", user.id)
                     continue
 
     async def _proactive_nudge_job(self) -> None:

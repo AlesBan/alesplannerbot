@@ -5,6 +5,11 @@ on:
     workflows: ["Build And Push GHCR Images"]
     types: [completed]
   workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "GHCR tag to deploy (e.g. commit SHA). Default: latest"
+        required: false
+        default: "latest"
 
 concurrency:
   group: deploy-render-ghcr-main
@@ -12,7 +17,7 @@ concurrency:
 
 jobs:
   deploy:
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main') }}
     runs-on: ubuntu-latest
     env:
       RENDER_BOT_DEPLOY_HOOK: ${{ secrets.RENDER_BOT_DEPLOY_HOOK }}
@@ -20,8 +25,27 @@ jobs:
       RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
       RENDER_BOT_SERVICE_ID: ${{ secrets.RENDER_BOT_SERVICE_ID }}
       RENDER_API_SERVICE_ID: ${{ secrets.RENDER_API_SERVICE_ID }}
+      RENDER_API_HEALTHCHECK_URL: ${{ secrets.RENDER_API_HEALTHCHECK_URL }}
       GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
     steps:
+      - name: Resolve image tag
+        id: tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ github.event.inputs.image_tag }}"
+            if [ -z "$tag" ]; then
+              tag="latest"
+            fi
+          else
+            tag="${{ github.event.workflow_run.head_sha }}"
+            if [ -z "$tag" ]; then
+              tag="latest"
+            fi
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
       - name: Validate required secrets
         shell: bash
         run: |
@@ -31,12 +55,12 @@ jobs:
             exit 1
           fi
 
-      - name: Trigger bot deploy from GHCR latest
+      - name: Trigger bot deploy from GHCR tag
         shell: bash
         run: |
           set -euo pipefail
           owner_lc="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
-          bot_img="ghcr.io/${owner_lc}/life-ai-bot:latest"
+          bot_img="ghcr.io/${owner_lc}/life-ai-bot:${{ steps.tag.outputs.tag }}"
           encoded_img="$(python -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$bot_img")"
           separator="?"
           if [[ "${RENDER_BOT_DEPLOY_HOOK}" == *\?* ]]; then
@@ -61,12 +85,12 @@ jobs:
             -H "Content-Type: application/json" \
             -d '{}'
 
-      - name: Trigger api deploy from GHCR latest
+      - name: Trigger api deploy from GHCR tag
         shell: bash
         run: |
           set -euo pipefail
           owner_lc="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
-          api_img="ghcr.io/${owner_lc}/life-ai-api:latest"
+          api_img="ghcr.io/${owner_lc}/life-ai-api:${{ steps.tag.outputs.tag }}"
           encoded_img="$(python -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$api_img")"
           separator="?"
           if [[ "${RENDER_API_DEPLOY_HOOK}" == *\?* ]]; then
@@ -90,3 +114,45 @@ jobs:
             -H "Authorization: Bearer ${RENDER_API_KEY}" \
             -H "Content-Type: application/json" \
             -d '{}'
+
+      - name: Verify API deploy status (best effort)
+        if: ${{ env.RENDER_API_KEY != '' && env.RENDER_API_SERVICE_ID != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          max_attempts=24
+          sleep_seconds=10
+          echo "Polling Render deploy status for API service..."
+          for i in $(seq 1 "$max_attempts"); do
+            status="$(curl --silent --show-error \
+              -H "Authorization: Bearer ${RENDER_API_KEY}" \
+              "https://api.render.com/v1/services/${RENDER_API_SERVICE_ID}" | python -c "import sys, json; data=json.load(sys.stdin); print((data.get('service') or {}).get('serviceDetails', {}).get('buildPlan', 'unknown'))")"
+            # buildPlan is not full deploy state, but gives quick signal service is reachable.
+            echo "Attempt ${i}/${max_attempts}: render service reachable, plan=${status}"
+            if [ -n "$status" ] && [ "$status" != "unknown" ]; then
+              exit 0
+            fi
+            sleep "$sleep_seconds"
+          done
+          echo "Warning: could not verify API deploy status in time."
+
+      - name: Smoke check API health endpoint (best effort)
+        if: ${{ env.RENDER_API_HEALTHCHECK_URL != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          max_attempts=18
+          sleep_seconds=10
+          echo "Checking ${RENDER_API_HEALTHCHECK_URL} ..."
+          for i in $(seq 1 "$max_attempts"); do
+            code="$(curl --silent --output /tmp/health_body.txt --write-out '%{http_code}' "${RENDER_API_HEALTHCHECK_URL}" || true)"
+            if [ "$code" = "200" ]; then
+              echo "Healthcheck OK."
+              exit 0
+            fi
+            echo "Attempt ${i}/${max_attempts}: healthcheck status=${code}"
+            sleep "$sleep_seconds"
+          done
+          echo "Healthcheck failed."
+          cat /tmp/health_body.txt || true
+          exit 1

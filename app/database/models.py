@@ -88,6 +88,7 @@ class User(Base):
     calendar_outbox_items: Mapped[list["CalendarOutbox"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     training_feedback_items: Mapped[list["TrainingFeedback"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     training_sessions: Mapped[list["TrainingSession"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    agent_runs: Mapped[list["AgentRun"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
 
 class Task(Base):
@@ -394,3 +395,33 @@ class TrainingSession(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     user: Mapped["User"] = relationship(back_populates="training_sessions")
+
+
+class AgentRun(Base):
+    __tablename__ = "agent_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    run_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    user_message: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(32), default="running")  # running|completed|failed
+    final_answer: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user: Mapped["User"] = relationship(back_populates="agent_runs")
+    steps: Mapped[list["AgentStep"]] = relationship(back_populates="run", cascade="all, delete-orphan")
+
+
+class AgentStep(Base):
+    __tablename__ = "agent_steps"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("agent_runs.id"), index=True)
+    step_no: Mapped[int] = mapped_column(Integer)
+    action_json: Mapped[str] = mapped_column(Text)
+    result_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    run: Mapped["AgentRun"] = relationship(back_populates="steps")

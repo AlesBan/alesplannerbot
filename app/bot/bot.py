@@ -26,6 +26,8 @@ async def _set_bot_commands(bot: Bot) -> None:
             BotCommand(command="start", description="Запуск и меню"),
             BotCommand(command="now", description="Что у меня на сейчас"),
             BotCommand(command="today", description="Планы на сегодня"),
+            BotCommand(command="agent_trace", description="Показать шаги агента"),
+            BotCommand(command="agent_trace_last", description="Полный JSON последнего trace"),
             BotCommand(command="training_on", description="Старт сессии вопросов"),
             BotCommand(command="training_off", description="Выключить режим обучения"),
             BotCommand(command="training_show", description="Показать чему бот научился"),

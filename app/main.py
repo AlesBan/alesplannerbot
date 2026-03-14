@@ -13,7 +13,7 @@ from app.ai.planner import AIPlanner
 from app.ai.recommendations import RecommendationEngine
 from app.config import get_settings
 from app.database.db import Base, SessionLocal, engine, get_db
-from app.database.models import Task, TaskStatus, User
+from app.database.models import AgentRun, AgentStep, Task, TaskStatus, User
 from app.integrations.google_calendar import GoogleCalendarService
 from app.services.calendar_domain_service import CalendarDomainService
 from app.services.calendar_read_service import CalendarReadService
@@ -130,10 +130,65 @@ def weekly_report(telegram_id: int, db: Session = Depends(get_db)) -> dict:
     }
 
 
+@app.get("/agent/runs/{telegram_id}")
+def agent_runs(telegram_id: int, limit: int = Query(default=10, ge=1, le=100), db: Session = Depends(get_db)) -> dict:
+    user = _get_user_by_telegram(db, telegram_id)
+    rows = (
+        db.query(AgentRun)
+        .filter(AgentRun.user_id == user.id)
+        .order_by(AgentRun.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    return {
+        "runs": [
+            {
+                "run_id": r.run_id,
+                "status": r.status,
+                "message": r.user_message,
+                "final_answer": r.final_answer,
+                "error": r.error,
+                "created_at": r.created_at.isoformat(),
+            }
+            for r in rows
+        ]
+    }
+
+
+@app.get("/agent/run/{run_id}")
+def agent_run(run_id: str, db: Session = Depends(get_db)) -> dict:
+    run = db.query(AgentRun).filter(AgentRun.run_id == run_id).one_or_none()
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    steps = (
+        db.query(AgentStep)
+        .filter(AgentStep.run_id == run.id)
+        .order_by(AgentStep.step_no.asc())
+        .all()
+    )
+    return {
+        "run_id": run.run_id,
+        "status": run.status,
+        "user_message": run.user_message,
+        "final_answer": run.final_answer,
+        "error": run.error,
+        "steps": [
+            {
+                "step_no": s.step_no,
+                "action_json": s.action_json,
+                "result_json": s.result_json,
+                "created_at": s.created_at.isoformat(),
+            }
+            for s in steps
+        ],
+    }
+
+
 @app.get("/calendar/day/{telegram_id}")
 def calendar_day(
     telegram_id: int,
     day_offset: int = Query(default=0, ge=-30, le=30),
+    date: str | None = Query(default=None, description="Target date in YYYY-MM-DD or DD.MM.YYYY"),
     db: Session = Depends(get_db),
 ) -> dict:
     user = _get_user_by_telegram(db, telegram_id)
@@ -142,7 +197,12 @@ def calendar_day(
     calendar_tz = gcal.get_calendar_timezone() or user.timezone or get_settings().timezone
     sync = CalendarSyncService(db)
     sync.pull_incremental(user.id, calendar_id)
-    day_label, events = CalendarReadService(db).list_day_events(user.id, calendar_tz, day_offset)
+    read = CalendarReadService(db)
+    if date:
+        parsed = date_parser.parse(date).date()
+        day_label, events = read.list_date_events(user.id, calendar_tz, parsed)
+    else:
+        day_label, events = read.list_day_events(user.id, calendar_tz, day_offset)
     return {
         "date": day_label,
         "timezone": calendar_tz,
@@ -266,6 +326,33 @@ def calendar_full_import(telegram_id: int, years_back: int = 2, years_forward: i
         years_forward=years_forward,
     )
     return {"imported": imported, "years_back": years_back, "years_forward": years_forward}
+
+
+@app.post("/calendar/sync/range/{telegram_id}")
+def calendar_range_import(
+    telegram_id: int,
+    start_date: str = Query(default="2026-03-01"),
+    end_date: str = Query(default="2030-12-31"),
+    db: Session = Depends(get_db),
+) -> dict:
+    user = _get_user_by_telegram(db, telegram_id)
+    start = date_parser.parse(start_date)
+    end = date_parser.parse(end_date)
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    else:
+        start = start.astimezone(timezone.utc)
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=timezone.utc)
+    else:
+        end = end.astimezone(timezone.utc)
+    imported = CalendarSyncService(db).import_range(
+        user.id,
+        get_settings().google_calendar_id,
+        start,
+        end,
+    )
+    return {"imported": imported, "start_date": start_date, "end_date": end_date}
 
 
 @app.post("/eval/run/{telegram_id}")

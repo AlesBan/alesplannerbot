@@ -35,10 +35,11 @@ class KnowledgeService:
             db.add(KnowledgeItem(user_id=None, topic=topic, content=content, source="seed"))
         db.commit()
 
-    def add_turn(self, role: str, content: str, intent: str = "general_chat") -> None:
+    def add_turn(self, role: str, content: str, intent: str = "general_chat", commit: bool = True) -> None:
         turn = ConversationTurn(user_id=self.user_id, role=role, content=content, intent=intent)
         self.db.add(turn)
-        self.db.commit()
+        if commit:
+            self.db.commit()
 
     def is_training_enabled(self) -> bool:
         raw = (self.context.get_memory("training_mode") or "on").strip().lower()
@@ -93,7 +94,7 @@ class KnowledgeService:
             if any(token in lower for token in ["сейчас", "на сейчас", "right now", "current"]):
                 self.context.set_memory("style_current_focus", "single_current_then_next")
 
-    def add_knowledge(self, topic: str, content: str, source: str = "chat") -> None:
+    def add_knowledge(self, topic: str, content: str, source: str = "chat", commit: bool = True) -> None:
         self.db.add(
             KnowledgeItem(
                 user_id=self.user_id,
@@ -102,9 +103,10 @@ class KnowledgeService:
                 source=source[:64],
             )
         )
-        self.db.commit()
+        if commit:
+            self.db.commit()
 
-    def learn_qa_pair(self, question: str, answer: str, confidence: int = 60) -> None:
+    def learn_qa_pair(self, question: str, answer: str, confidence: int = 60, commit: bool = True) -> None:
         self.db.add(
             LearnedQA(
                 user_id=self.user_id,
@@ -113,7 +115,8 @@ class KnowledgeService:
                 confidence=max(1, min(100, confidence)),
             )
         )
-        self.db.commit()
+        if commit:
+            self.db.commit()
 
     def get_recent_turns(self, limit: int = 8) -> list[ConversationTurn]:
         stmt = (
@@ -246,8 +249,13 @@ class KnowledgeService:
                     confidence=95,
                 )
             )
+        self.add_knowledge(
+            topic="teacher_feedback",
+            content=f"Q: {prev_user_question} | A: {expected_answer}",
+            source="teacher_feedback",
+            commit=False,
+        )
         self.db.commit()
-        self.add_knowledge(topic="teacher_feedback", content=f"Q: {prev_user_question} | A: {expected_answer}", source="teacher_feedback")
         return {"ok": True, "question": prev_user_question, "expected": expected_answer}
 
     def reply_with_memory(self, user_message: str, allow_greeting: bool = True) -> str:
@@ -311,6 +319,12 @@ class KnowledgeService:
         if len(user_text) < 8 or len(assistant_text) < 8:
             return
         if "?" in user_text or user_text.lower().startswith(("как", "what", "how", "почему", "зачем")):
-            self.learn_qa_pair(question=user_text[:700], answer=assistant_text[:1200], confidence=55)
-        self.add_knowledge(topic="dialogue_summary", content=f"User: {user_text} | Assistant: {assistant_text}", source="auto_dialogue")
-        self.context.set_memory("last_chat_at", datetime.utcnow().isoformat())
+            self.learn_qa_pair(question=user_text[:700], answer=assistant_text[:1200], confidence=55, commit=False)
+        self.add_knowledge(
+            topic="dialogue_summary",
+            content=f"User: {user_text} | Assistant: {assistant_text}",
+            source="auto_dialogue",
+            commit=False,
+        )
+        self.context.set_memory("last_chat_at", datetime.utcnow().isoformat(), commit=False)
+        self.db.commit()
