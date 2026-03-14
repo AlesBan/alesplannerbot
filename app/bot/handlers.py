@@ -792,6 +792,13 @@ def _build_local_day_label(timezone_name: str, day_offset: int = 0) -> str:
     return day.strftime("%d.%m.%Y")
 
 
+def _next_weekday(base: date, target_weekday: int, force_next_week: bool) -> date:
+    delta = (target_weekday - base.weekday()) % 7
+    if force_next_week:
+        delta = delta + 7 if delta == 0 else delta
+    return base + timedelta(days=delta)
+
+
 def _extract_requested_date(text: str, timezone_name: str) -> date | None:
     lower = (text or "").lower()
     try:
@@ -808,6 +815,50 @@ def _extract_requested_date(text: str, timezone_name: str) -> date | None:
     if "вчера" in lower or "yesterday" in lower:
         return now_local - timedelta(days=1)
 
+    weekday_map = {
+        "понедельник": 0,
+        "вторник": 1,
+        "среда": 2,
+        "четверг": 3,
+        "пятница": 4,
+        "суббота": 5,
+        "воскресенье": 6,
+    }
+    for word, weekday_idx in weekday_map.items():
+        if word in lower:
+            is_next = ("следующ" in lower) or ("next" in lower)
+            return _next_weekday(now_local, weekday_idx, force_next_week=is_next)
+
+    month_map = {
+        "января": 1,
+        "февраля": 2,
+        "марта": 3,
+        "апреля": 4,
+        "мая": 5,
+        "июня": 6,
+        "июля": 7,
+        "августа": 8,
+        "сентября": 9,
+        "октября": 10,
+        "ноября": 11,
+        "декабря": 12,
+    }
+    m_ru = re.search(
+        r"\b(\d{1,2})\s+(января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)(?:\s+(\d{4}))?\b",
+        lower,
+    )
+    if m_ru:
+        dd = int(m_ru.group(1))
+        mm = month_map[m_ru.group(2)]
+        yyyy = int(m_ru.group(3)) if m_ru.group(3) else now_local.year
+        try:
+            candidate = date(yyyy, mm, dd)
+            if not m_ru.group(3) and candidate < now_local:
+                candidate = date(yyyy + 1, mm, dd)
+            return candidate
+        except Exception:
+            return None
+
     m = re.search(r"\b(\d{2})\.(\d{2})\.(\d{4})\b", lower)
     if m:
         dd, mm, yyyy = int(m.group(1)), int(m.group(2)), int(m.group(3))
@@ -823,6 +874,28 @@ def _extract_requested_date(text: str, timezone_name: str) -> date | None:
         except Exception:
             return None
     return None
+
+
+def _looks_like_calendar_read_query(text: str) -> bool:
+    lower = (text or "").lower()
+    read_markers = [
+        "какие события",
+        "что у меня",
+        "что по плану",
+        "покажи события",
+        "расписание",
+        "планы",
+        "events",
+        "schedule",
+        "what is on",
+    ]
+    return any(marker in lower for marker in read_markers)
+
+
+def _looks_like_calendar_add_request(text: str) -> bool:
+    lower = (text or "").lower()
+    add_markers = ["добав", "постав", "создай", "add", "create", "insert"]
+    return any(marker in lower for marker in add_markers)
 
 
 def _ensure_local_calendar_window_2026_2030(
@@ -1826,6 +1899,7 @@ async def natural_chat_handler(message: Message) -> None:
             and (not pending_delete_exists)
             and normalized_cmd not in {"now", "today", "покажи события на сегодня"}
             and pre_intent in {ChatIntent.general_chat, ChatIntent.connections_check, ChatIntent.calendar_modify_help}
+            and not _looks_like_calendar_read_query(text)
         ):
             agent_reply = AgentOrchestrator(db, user.id).run(text, provider_calendar_id=provider_calendar_id)
             if agent_reply:
@@ -1850,47 +1924,51 @@ async def natural_chat_handler(message: Message) -> None:
         )
 
         if intent == ChatIntent.calendar_add or intent == ChatIntent.add_task:
-            gcal = GoogleCalendarService()
-            calendar_tz = gcal.get_calendar_timezone() or user.timezone or settings.timezone
-            payload = _resolve_calendar_add_params(normalized_text, params, calendar_tz)
-            if not payload:
+            # Guard against false-positive add routing on date corrections like "это будет 16 марта".
+            if not _looks_like_calendar_add_request(text) and _extract_requested_date(text, user.timezone or settings.timezone):
+                intent = ChatIntent.calendar_check
+            else:
+                gcal = GoogleCalendarService()
+                calendar_tz = gcal.get_calendar_timezone() or user.timezone or settings.timezone
+                payload = _resolve_calendar_add_params(normalized_text, params, calendar_tz)
+                if not payload:
+                    _save_pending_action(
+                        context,
+                        "calendar_add_collect",
+                        {"seed_text": normalized_text, "timezone": calendar_tz},
+                    )
+                    _set_last_intent(context, "calendar_add_collect", active_goal="calendar_add", pending_slots=["time_range", "title"])
+                    reply = ks.reply_with_backend_result(
+                        text,
+                        operation="calendar_add_need_details",
+                        payload={"required": ["title", "start_time", "end_time"], "example": "добавь 20:30-21:00 Рисование"},
+                    ) or "Уточни время и название, например: 'добавь 20:30-21:00 Рисование'."
+                    await message.answer(reply)
+                    ks.add_turn(role="assistant", content=reply, intent="calendar_add")
+                    return
+
                 _save_pending_action(
                     context,
-                    "calendar_add_collect",
-                    {"seed_text": normalized_text, "timezone": calendar_tz},
+                    "calendar_add_confirm",
+                    {
+                        "title": payload["title"],
+                        "start_utc": payload["start_local"].astimezone(timezone.utc).replace(tzinfo=None).isoformat(),
+                        "end_utc": payload["end_local"].astimezone(timezone.utc).replace(tzinfo=None).isoformat(),
+                        "timezone": calendar_tz,
+                        "day_label": payload["day_label"],
+                        "description": params.get("description"),
+                        "location": params.get("location"),
+                    },
                 )
-                _set_last_intent(context, "calendar_add_collect", active_goal="calendar_add", pending_slots=["time_range", "title"])
-                reply = ks.reply_with_backend_result(
-                    text,
-                    operation="calendar_add_need_details",
-                    payload={"required": ["title", "start_time", "end_time"], "example": "добавь 20:30-21:00 Рисование"},
-                ) or "Уточни время и название, например: 'добавь 20:30-21:00 Рисование'."
-                await message.answer(reply)
-                ks.add_turn(role="assistant", content=reply, intent="calendar_add")
+                reply = (
+                    f"Подтверди добавление: "
+                    f"{payload['start_local'].strftime('%H:%M')}–{payload['end_local'].strftime('%H:%M')} "
+                    f"{payload['title']} ({payload['day_label']}). Ответь: да / нет."
+                )
+                await message.answer(reply, reply_markup=_pending_confirm_keyboard())
+                ks.add_turn(role="assistant", content=reply, intent="calendar_add_confirm")
+                _set_last_intent(context, "calendar_add_confirm", active_goal="calendar_add", pending_slots=[])
                 return
-
-            _save_pending_action(
-                context,
-                "calendar_add_confirm",
-                {
-                    "title": payload["title"],
-                    "start_utc": payload["start_local"].astimezone(timezone.utc).replace(tzinfo=None).isoformat(),
-                    "end_utc": payload["end_local"].astimezone(timezone.utc).replace(tzinfo=None).isoformat(),
-                    "timezone": calendar_tz,
-                    "day_label": payload["day_label"],
-                    "description": params.get("description"),
-                    "location": params.get("location"),
-                },
-            )
-            reply = (
-                f"Подтверди добавление: "
-                f"{payload['start_local'].strftime('%H:%M')}–{payload['end_local'].strftime('%H:%M')} "
-                f"{payload['title']} ({payload['day_label']}). Ответь: да / нет."
-            )
-            await message.answer(reply, reply_markup=_pending_confirm_keyboard())
-            ks.add_turn(role="assistant", content=reply, intent="calendar_add_confirm")
-            _set_last_intent(context, "calendar_add_confirm", active_goal="calendar_add", pending_slots=[])
-            return
 
         if intent == ChatIntent.calendar_delete:
             reply = _delete_calendar_event_from_snapshot(
@@ -1968,6 +2046,7 @@ async def natural_chat_handler(message: Message) -> None:
             # Local-first: read from local calendar store, sync with Google as secondary path.
             gcal = GoogleCalendarService()
             calendar_tz = gcal.get_calendar_timezone() or user.timezone or settings.timezone
+            _ensure_local_calendar_window_2026_2030(context, calendar_sync, user.id, provider_calendar_id)
             requested_date = _extract_requested_date(normalized_text or text, calendar_tz)
             if requested_date:
                 day_label, events = calendar_read.list_date_events(user.id, calendar_tz, requested_date)
@@ -2098,6 +2177,7 @@ async def natural_chat_handler(message: Message) -> None:
         if intent == ChatIntent.calendar_check:
             gcal = GoogleCalendarService()
             calendar_tz = gcal.get_calendar_timezone() or user.timezone or settings.timezone
+            _ensure_local_calendar_window_2026_2030(context, calendar_sync, user.id, provider_calendar_id)
             requested_date = _extract_requested_date(normalized_text or text, calendar_tz)
             if requested_date:
                 day_label, events = calendar_read.list_date_events(user.id, calendar_tz, requested_date)
