@@ -30,10 +30,14 @@ services:
       - key: YOU_GILE_API_KEY
         sync: false
       - key: YOU_GILE_BASE_URL
-        value: https://yougile.com/api-v2
+        value: https://ru.yougile.com/api-v2
       - key: YOU_GILE_EMAIL
         sync: false
       - key: YOU_GILE_PASSWORD
+        sync: false
+      - key: YOU_GILE_COMPANY_NAME
+        sync: false
+      - key: YOU_GILE_COMPANY_ID
         sync: false
       - key: GOOGLE_CALENDAR_ID
         sync: false
@@ -51,6 +55,8 @@ services:
         value: "21"
       - key: MAX_DAILY_WORK_MINUTES
         value: "480"
+      - key: TELEGRAM_WEBAPP_BASE_URL
+        sync: false
 
   - type: web
     name: life-ai-api
@@ -82,10 +88,14 @@ services:
       - key: YOU_GILE_API_KEY
         sync: false
       - key: YOU_GILE_BASE_URL
-        value: https://yougile.com/api-v2
+        value: https://ru.yougile.com/api-v2
       - key: YOU_GILE_EMAIL
         sync: false
       - key: YOU_GILE_PASSWORD
+        sync: false
+      - key: YOU_GILE_COMPANY_NAME
+        sync: false
+      - key: YOU_GILE_COMPANY_ID
         sync: false
       - key: GOOGLE_CALENDAR_ID
         sync: false
@@ -103,6 +113,8 @@ services:
         value: "21"
       - key: MAX_DAILY_WORK_MINUTES
         value: "480"
+      - key: TELEGRAM_WEBAPP_BASE_URL
+        sync: false
 
 databases:
   - name: life-ai-db

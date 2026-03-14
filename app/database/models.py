@@ -89,6 +89,12 @@ class User(Base):
     training_feedback_items: Mapped[list["TrainingFeedback"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     training_sessions: Mapped[list["TrainingSession"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     agent_runs: Mapped[list["AgentRun"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    yougile_projects: Mapped[list["YouGileProject"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    yougile_boards: Mapped[list["YouGileBoard"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    yougile_columns: Mapped[list["YouGileColumn"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    yougile_tasks: Mapped[list["YouGileTask"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    yougile_assignees: Mapped[list["YouGileTaskAssignee"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    yougile_stickers: Mapped[list["YouGileTaskSticker"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
 
 class Task(Base):
@@ -425,3 +431,115 @@ class AgentStep(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     run: Mapped["AgentRun"] = relationship(back_populates="steps")
+
+
+class YouGileProject(Base):
+    __tablename__ = "yougile_projects"
+    __table_args__ = (UniqueConstraint("user_id", "project_id", name="uq_yougile_project_user_project"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    project_id: Mapped[str] = mapped_column(String(128), index=True)
+    title: Mapped[str] = mapped_column(String(255), default="Untitled project")
+    deleted: Mapped[bool] = mapped_column(Boolean, default=False)
+    raw_json: Mapped[str] = mapped_column(Text, default="{}")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    user: Mapped["User"] = relationship(back_populates="yougile_projects")
+
+
+class YouGileColumn(Base):
+    __tablename__ = "yougile_columns"
+    __table_args__ = (UniqueConstraint("user_id", "column_id", name="uq_yougile_column_user_column"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    column_id: Mapped[str] = mapped_column(String(128), index=True)
+    board_id: Mapped[str | None] = mapped_column(String(128), index=True, nullable=True)
+    project_id: Mapped[str | None] = mapped_column(String(128), index=True, nullable=True)
+    title: Mapped[str] = mapped_column(String(255), default="Untitled column")
+    deleted: Mapped[bool] = mapped_column(Boolean, default=False)
+    raw_json: Mapped[str] = mapped_column(Text, default="{}")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    user: Mapped["User"] = relationship(back_populates="yougile_columns")
+
+
+class YouGileTask(Base):
+    __tablename__ = "yougile_tasks"
+    __table_args__ = (UniqueConstraint("user_id", "task_id", name="uq_yougile_task_user_task"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    task_id: Mapped[str] = mapped_column(String(128), index=True)
+    board_id: Mapped[str | None] = mapped_column(String(128), index=True, nullable=True)
+    project_id: Mapped[str | None] = mapped_column(String(128), index=True, nullable=True)
+    column_id: Mapped[str | None] = mapped_column(String(128), index=True, nullable=True)
+    project_title_cache: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    board_title_cache: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    column_title_cache: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    status_flag: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
+    title: Mapped[str] = mapped_column(String(255), default="Untitled task")
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    completed: Mapped[bool] = mapped_column(Boolean, default=False)
+    archived: Mapped[bool] = mapped_column(Boolean, default=False)
+    deleted: Mapped[bool] = mapped_column(Boolean, default=False)
+    due_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    ready_for_calendar: Mapped[bool] = mapped_column(Boolean, default=False)
+    linked_calendar_event_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    raw_json: Mapped[str] = mapped_column(Text, default="{}")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    user: Mapped["User"] = relationship(back_populates="yougile_tasks")
+    assignees: Mapped[list["YouGileTaskAssignee"]] = relationship(back_populates="task", cascade="all, delete-orphan")
+    stickers: Mapped[list["YouGileTaskSticker"]] = relationship(back_populates="task", cascade="all, delete-orphan")
+
+
+class YouGileTaskAssignee(Base):
+    __tablename__ = "yougile_task_assignees"
+    __table_args__ = (UniqueConstraint("task_row_id", "member_id", name="uq_yougile_task_assignee"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    task_row_id: Mapped[int] = mapped_column(ForeignKey("yougile_tasks.id"), index=True)
+    member_id: Mapped[str] = mapped_column(String(128), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    user: Mapped["User"] = relationship(back_populates="yougile_assignees")
+    task: Mapped["YouGileTask"] = relationship(back_populates="assignees")
+
+
+class YouGileTaskSticker(Base):
+    __tablename__ = "yougile_task_stickers"
+    __table_args__ = (UniqueConstraint("task_row_id", "sticker_key", name="uq_yougile_task_sticker"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    task_row_id: Mapped[int] = mapped_column(ForeignKey("yougile_tasks.id"), index=True)
+    sticker_key: Mapped[str] = mapped_column(String(128))
+    sticker_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user: Mapped["User"] = relationship(back_populates="yougile_stickers")
+    task: Mapped["YouGileTask"] = relationship(back_populates="stickers")
+
+
+class YouGileBoard(Base):
+    __tablename__ = "yougile_boards"
+    __table_args__ = (UniqueConstraint("user_id", "board_id", name="uq_yougile_board_user_board"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    board_id: Mapped[str] = mapped_column(String(128), index=True)
+    project_id: Mapped[str | None] = mapped_column(String(128), index=True, nullable=True)
+    title: Mapped[str] = mapped_column(String(255), default="Untitled board")
+    deleted: Mapped[bool] = mapped_column(Boolean, default=False)
+    raw_json: Mapped[str] = mapped_column(Text, default="{}")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    user: Mapped["User"] = relationship(back_populates="yougile_boards")

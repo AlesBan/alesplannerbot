@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     morning_plan_hour: int = Field(default=8, alias="MORNING_PLAN_HOUR")
     evening_review_hour: int = Field(default=21, alias="EVENING_REVIEW_HOUR")
     max_daily_work_minutes: int = Field(default=480, alias="MAX_DAILY_WORK_MINUTES")
+    telegram_webapp_base_url: str = Field(default="", alias="TELEGRAM_WEBAPP_BASE_URL")
 
 
 @lru_cache

@@ -13,7 +13,8 @@ from app.ai.planner import AIPlanner
 from app.ai.recommendations import RecommendationEngine
 from app.config import get_settings
 from app.database.db import Base, SessionLocal, engine, get_db
-from app.database.models import AgentRun, AgentStep, Task, TaskStatus, User
+from app.database.schema_compat import ensure_yougile_columns
+from app.database.models import AgentRun, AgentStep, Task, TaskStatus, User, YouGileTask
 from app.integrations.google_calendar import GoogleCalendarService
 from app.services.calendar_domain_service import CalendarDomainService
 from app.services.calendar_read_service import CalendarReadService
@@ -24,6 +25,7 @@ from app.services.knowledge_service import KnowledgeService
 from app.services.scheduler import AIScheduler
 from app.services.sync_service import SyncService
 from app.services.task_manager import TaskManager
+from app.services.yougile_sync_service import YouGileSyncService
 
 app = FastAPI(title="Life AI Assistant API")
 
@@ -52,6 +54,53 @@ class CalendarEventPatchIn(BaseModel):
     reminders: list[dict] | None = None
 
 
+class YouGileProjectCreateIn(BaseModel):
+    title: str = Field(min_length=1, max_length=255)
+
+
+class YouGileProjectPatchIn(BaseModel):
+    title: str | None = None
+    deleted: bool | None = None
+
+
+class YouGileColumnCreateIn(BaseModel):
+    title: str = Field(min_length=1, max_length=255)
+    project_id: str = Field(min_length=1, max_length=128)
+    color: int | None = None
+
+
+class YouGileColumnPatchIn(BaseModel):
+    title: str | None = None
+    project_id: str | None = None
+    color: int | None = None
+    deleted: bool | None = None
+
+
+class YouGileTaskCreateIn(BaseModel):
+    title: str = Field(min_length=1, max_length=255)
+    column_id: str = Field(min_length=1, max_length=128)
+    description: str | None = None
+    assigned: list[str] = Field(default_factory=list)
+    stickers: dict[str, str] = Field(default_factory=dict)
+
+
+class YouGileTaskPatchIn(BaseModel):
+    title: str | None = None
+    description: str | None = None
+    completed: bool | None = None
+    archived: bool | None = None
+    deleted: bool | None = None
+    assigned: list[str] | None = None
+    stickers: dict[str, str] | None = None
+    column_id: str | None = None
+    ready_for_calendar: bool | None = None
+    linked_calendar_event_id: int | None = None
+
+
+class YouGileTaskMoveIn(BaseModel):
+    target_column_id: str = Field(min_length=1, max_length=128)
+
+
 class EvalRateIn(BaseModel):
     item_id: int
     rating: str = Field(pattern=r"^[+-]$")
@@ -61,6 +110,7 @@ class EvalRateIn(BaseModel):
 @app.on_event("startup")
 def on_startup() -> None:
     Base.metadata.create_all(bind=engine)
+    ensure_yougile_columns(engine)
     with SessionLocal() as db:
         KnowledgeService.seed_global_knowledge(db)
         IntentProfileService.seed_defaults(db)
@@ -71,11 +121,101 @@ def health() -> dict:
     return {"status": "ok"}
 
 
+@app.get("/miniapp/time-picker", response_class=HTMLResponse)
+def miniapp_time_picker(uid: int = Query(default=0), tz: str = Query(default="UTC")) -> HTMLResponse:
+    _ = uid
+    safe_tz = (tz or "UTC").strip()[:64]
+    html = f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Time Picker</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    body {{ font-family: Arial, sans-serif; margin: 16px; background: #111; color: #fff; }}
+    .row {{ margin-bottom: 12px; }}
+    input {{ width: 100%; font-size: 16px; padding: 10px; border-radius: 8px; border: 1px solid #444; background: #1b1b1b; color: #fff; }}
+    button {{ width: 100%; margin-top: 12px; font-size: 16px; padding: 12px; border-radius: 10px; border: none; background: #2ea6ff; color: #fff; }}
+    .hint {{ color: #aaa; font-size: 13px; }}
+  </style>
+</head>
+<body>
+  <h3>Выбор времени задачи</h3>
+  <div class="hint">Часовой пояс: {safe_tz}</div>
+  <div class="row">
+    <label>Начало</label>
+    <input id="start" type="datetime-local" />
+  </div>
+  <div class="row">
+    <label>Конец</label>
+    <input id="end" type="datetime-local" />
+  </div>
+  <button id="saveBtn">Сохранить</button>
+  <script>
+    const tg = window.Telegram.WebApp;
+    tg.ready();
+    tg.expand();
+    const start = document.getElementById("start");
+    const end = document.getElementById("end");
+    const now = new Date();
+    const startDefault = new Date(now.getTime() + 30 * 60000);
+    const endDefault = new Date(now.getTime() + 90 * 60000);
+    function pad(v) {{ return String(v).padStart(2, "0"); }}
+    function toLocalInput(d) {{
+      return `${{d.getFullYear()}}-${{pad(d.getMonth()+1)}}-${{pad(d.getDate())}}T${{pad(d.getHours())}}:${{pad(d.getMinutes())}}`;
+    }}
+    start.value = toLocalInput(startDefault);
+    end.value = toLocalInput(endDefault);
+    document.getElementById("saveBtn").addEventListener("click", () => {{
+      if (!start.value || !end.value) {{
+        tg.showAlert("Заполни время начала и конца.");
+        return;
+      }}
+      const payload = {{
+        kind: "yougile_task_time_picker",
+        timezone: "{safe_tz}",
+        start_local_iso: start.value,
+        end_local_iso: end.value
+      }};
+      tg.sendData(JSON.stringify(payload));
+      tg.close();
+    }});
+  </script>
+</body>
+</html>"""
+    return HTMLResponse(html)
+
+
 def _get_user_by_telegram(db: Session, telegram_id: int) -> User:
     user = db.query(User).filter(User.telegram_id == telegram_id).one_or_none()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     return user
+
+
+def _yougile_task_to_dict(task: YouGileTask) -> dict:
+    return {
+        "task_id": task.task_id,
+        "board_id": task.board_id,
+        "project_id": task.project_id,
+        "column_id": task.column_id,
+        "project_title": task.project_title_cache,
+        "board_title": task.board_title_cache,
+        "column_title": task.column_title_cache,
+        "status_flag": task.status_flag,
+        "title": task.title,
+        "description": task.description,
+        "completed": task.completed,
+        "archived": task.archived,
+        "deleted": task.deleted,
+        "due_at": task.due_at.isoformat() if task.due_at else None,
+        "ready_for_calendar": task.ready_for_calendar,
+        "linked_calendar_event_id": task.linked_calendar_event_id,
+        "assignees": [a.member_id for a in task.assignees],
+        "stickers": {s.sticker_key: s.sticker_value for s in task.stickers},
+        "updated_at": task.updated_at.isoformat(),
+    }
 
 
 @app.post("/plan/{telegram_id}")
@@ -109,6 +249,168 @@ def sync_yougile(telegram_id: int, db: Session = Depends(get_db)) -> dict:
     user = _get_user_by_telegram(db, telegram_id)
     count = SyncService(db).sync_yougile_tasks(user.id)
     return {"synced_tasks": count}
+
+
+@app.post("/yougile/sync/full/{telegram_id}")
+def sync_yougile_full(telegram_id: int, db: Session = Depends(get_db)) -> dict:
+    user = _get_user_by_telegram(db, telegram_id)
+    result = YouGileSyncService(db).sync_all(user.id)
+    return {"synced": result}
+
+
+@app.get("/yougile/projects/{telegram_id}")
+def yougile_projects(telegram_id: int, db: Session = Depends(get_db)) -> dict:
+    user = _get_user_by_telegram(db, telegram_id)
+    rows = YouGileSyncService(db).list_projects(user.id)
+    return {
+        "projects": [
+            {
+                "project_id": p.project_id,
+                "title": p.title,
+                "deleted": p.deleted,
+                "updated_at": p.updated_at.isoformat(),
+            }
+            for p in rows
+        ]
+    }
+
+
+@app.post("/yougile/projects/{telegram_id}")
+def yougile_create_project(telegram_id: int, payload: YouGileProjectCreateIn, db: Session = Depends(get_db)) -> dict:
+    user = _get_user_by_telegram(db, telegram_id)
+    row = YouGileSyncService(db).create_project(user.id, payload.title)
+    if not row:
+        raise HTTPException(status_code=400, detail="Failed to create project in YouGile")
+    return {"project_id": row.project_id, "title": row.title}
+
+
+@app.patch("/yougile/projects/{telegram_id}/{project_id}")
+def yougile_patch_project(telegram_id: int, project_id: str, payload: YouGileProjectPatchIn, db: Session = Depends(get_db)) -> dict:
+    user = _get_user_by_telegram(db, telegram_id)
+    patch = payload.model_dump(exclude_unset=True)
+    row = YouGileSyncService(db).update_project(user.id, project_id, patch)
+    if not row:
+        raise HTTPException(status_code=404, detail="Project not found or update failed")
+    return {"project_id": row.project_id, "title": row.title, "deleted": row.deleted}
+
+
+@app.delete("/yougile/projects/{telegram_id}/{project_id}")
+def yougile_delete_project(telegram_id: int, project_id: str, db: Session = Depends(get_db)) -> dict:
+    user = _get_user_by_telegram(db, telegram_id)
+    ok = YouGileSyncService(db).delete_project(user.id, project_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Project not found or delete failed")
+    return {"deleted": True, "project_id": project_id}
+
+
+@app.get("/yougile/columns/{telegram_id}")
+def yougile_columns(
+    telegram_id: int,
+    project_id: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+) -> dict:
+    user = _get_user_by_telegram(db, telegram_id)
+    rows = YouGileSyncService(db).list_columns(user.id, project_id=project_id)
+    return {
+        "columns": [
+            {
+                "column_id": c.column_id,
+                "project_id": c.project_id,
+                "title": c.title,
+                "deleted": c.deleted,
+                "updated_at": c.updated_at.isoformat(),
+            }
+            for c in rows
+        ]
+    }
+
+
+@app.post("/yougile/columns/{telegram_id}")
+def yougile_create_column(telegram_id: int, payload: YouGileColumnCreateIn, db: Session = Depends(get_db)) -> dict:
+    user = _get_user_by_telegram(db, telegram_id)
+    row = YouGileSyncService(db).create_column(user.id, payload.title, payload.project_id, color=payload.color)
+    if not row:
+        raise HTTPException(status_code=400, detail="Failed to create column in YouGile")
+    return {"column_id": row.column_id, "project_id": row.project_id, "title": row.title}
+
+
+@app.patch("/yougile/columns/{telegram_id}/{column_id}")
+def yougile_patch_column(telegram_id: int, column_id: str, payload: YouGileColumnPatchIn, db: Session = Depends(get_db)) -> dict:
+    user = _get_user_by_telegram(db, telegram_id)
+    patch = payload.model_dump(exclude_unset=True)
+    if "project_id" in patch:
+        patch["boardId"] = patch.pop("project_id")
+    row = YouGileSyncService(db).update_column(user.id, column_id, patch)
+    if not row:
+        raise HTTPException(status_code=404, detail="Column not found or update failed")
+    return {"column_id": row.column_id, "project_id": row.project_id, "title": row.title, "deleted": row.deleted}
+
+
+@app.delete("/yougile/columns/{telegram_id}/{column_id}")
+def yougile_delete_column(telegram_id: int, column_id: str, db: Session = Depends(get_db)) -> dict:
+    user = _get_user_by_telegram(db, telegram_id)
+    ok = YouGileSyncService(db).delete_column(user.id, column_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Column not found or delete failed")
+    return {"deleted": True, "column_id": column_id}
+
+
+@app.get("/yougile/tasks/{telegram_id}")
+def yougile_tasks(
+    telegram_id: int,
+    project_id: str | None = Query(default=None),
+    column_id: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+) -> dict:
+    user = _get_user_by_telegram(db, telegram_id)
+    rows = YouGileSyncService(db).list_tasks(user.id, project_id=project_id, column_id=column_id)
+    return {"tasks": [_yougile_task_to_dict(row) for row in rows]}
+
+
+@app.post("/yougile/tasks/{telegram_id}")
+def yougile_create_task(telegram_id: int, payload: YouGileTaskCreateIn, db: Session = Depends(get_db)) -> dict:
+    user = _get_user_by_telegram(db, telegram_id)
+    row = YouGileSyncService(db).create_task(
+        user.id,
+        title=payload.title,
+        column_id=payload.column_id,
+        description=payload.description,
+        assigned=payload.assigned,
+        stickers=payload.stickers,
+    )
+    if not row:
+        raise HTTPException(status_code=400, detail="Failed to create task in YouGile")
+    return {"task": _yougile_task_to_dict(row)}
+
+
+@app.patch("/yougile/tasks/{telegram_id}/{task_id}")
+def yougile_patch_task(telegram_id: int, task_id: str, payload: YouGileTaskPatchIn, db: Session = Depends(get_db)) -> dict:
+    user = _get_user_by_telegram(db, telegram_id)
+    patch = payload.model_dump(exclude_unset=True)
+    if "column_id" in patch:
+        patch["columnId"] = patch.pop("column_id")
+    row = YouGileSyncService(db).update_task(user.id, task_id, patch)
+    if not row:
+        raise HTTPException(status_code=404, detail="Task not found or update failed")
+    return {"task": _yougile_task_to_dict(row)}
+
+
+@app.post("/yougile/tasks/{telegram_id}/{task_id}/move")
+def yougile_move_task(telegram_id: int, task_id: str, payload: YouGileTaskMoveIn, db: Session = Depends(get_db)) -> dict:
+    user = _get_user_by_telegram(db, telegram_id)
+    row = YouGileSyncService(db).move_task(user.id, task_id, payload.target_column_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Task not found or move failed")
+    return {"task": _yougile_task_to_dict(row)}
+
+
+@app.delete("/yougile/tasks/{telegram_id}/{task_id}")
+def yougile_delete_task(telegram_id: int, task_id: str, db: Session = Depends(get_db)) -> dict:
+    user = _get_user_by_telegram(db, telegram_id)
+    ok = YouGileSyncService(db).delete_task(user.id, task_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Task not found or delete failed")
+    return {"deleted": True, "task_id": task_id}
 
 
 @app.get("/report/{telegram_id}")

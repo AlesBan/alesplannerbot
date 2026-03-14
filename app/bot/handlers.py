@@ -3,10 +3,19 @@ import re
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote_plus
 from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, Message, ReplyKeyboardMarkup
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    Message,
+    ReplyKeyboardMarkup,
+    WebAppInfo,
+)
 
 from app.ai.chat_assistant import ChatAssistant, ChatIntent
 from app.ai.context_engine import ContextEngine
@@ -28,6 +37,7 @@ from app.services.scheduler import AIScheduler
 from app.services.sync_service import SyncService
 from app.services.task_manager import TaskManager
 from app.services.eval_harness import EvalHarnessService
+from app.services.yougile_sync_service import YouGileSyncService
 from app.config import get_settings
 
 router = Router()
@@ -605,6 +615,7 @@ def _main_menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="Что у меня на сейчас"), KeyboardButton(text="Покажи события на сегодня")],
+            [KeyboardButton(text="Новая задача")],
             [KeyboardButton(text="Режим обучения вкл"), KeyboardButton(text="Режим обучения выкл")],
             [KeyboardButton(text="Покажи чему ты научился"), KeyboardButton(text="Забудь последнее обучение")],
         ],
@@ -627,6 +638,53 @@ def _allow_greeting_reply(text: str, ks: KnowledgeService) -> bool:
                 return False
             break
     return True
+
+
+def _new_task_time_choice_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Да, знаю время", callback_data="ytask:time:yes"),
+                InlineKeyboardButton(text="Нет, пока без времени", callback_data="ytask:time:no"),
+            ],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="ytask:cancel")],
+        ]
+    )
+
+
+def _new_task_pick_keyboard(prefix: str, rows: list[tuple[str, str]], cancel: bool = True) -> InlineKeyboardMarkup:
+    buttons = [[InlineKeyboardButton(text=title[:40], callback_data=f"ytask:{prefix}:{row_id}")] for row_id, title in rows[:20]]
+    if cancel:
+        buttons.append([InlineKeyboardButton(text="❌ Отмена", callback_data="ytask:cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def _new_task_confirm_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Создать", callback_data="ytask:confirm:yes"),
+                InlineKeyboardButton(text="❌ Отмена", callback_data="ytask:confirm:no"),
+            ]
+        ]
+    )
+
+
+def _time_picker_webapp_url(user: User, context: ContextEngine) -> str:
+    base = (settings.telegram_webapp_base_url or "").strip().rstrip("/")
+    if not (base.startswith("https://") or base.startswith("http://")):
+        return ""
+    tz_name = context.get_memory("calendar_timezone") or user.timezone or settings.timezone or "UTC"
+    return f"{base}/miniapp/time-picker?uid={user.telegram_id}&tz={quote_plus(tz_name)}"
+
+
+def _new_task_time_webapp_keyboard(url: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📅 Выбрать дату и время", web_app=WebAppInfo(url=url))],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="ytask:cancel")],
+        ]
+    )
 
 
 def _format_calendar_events(events: list, timezone_name: str, max_items: int | None = 20) -> str:
@@ -1381,6 +1439,132 @@ def _process_pending_action(
     return "Неизвестный тип ожидающего действия. Повтори запрос."
 
 
+def _wizard_state(context: ContextEngine) -> dict | None:
+    pending = _load_pending_action(context)
+    if not pending:
+        return None
+    if str(pending.get("type") or "") != "yougile_task_wizard":
+        return None
+    payload = pending.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def _set_wizard_state(context: ContextEngine, payload: dict) -> None:
+    _save_pending_action(context, "yougile_task_wizard", payload)
+
+
+def _parse_calendar_slot_input(text: str, timezone_name: str) -> dict | None:
+    range_match = re.search(r"(\d{1,2}:\d{2})\s*[–-]\s*(\d{1,2}:\d{2})", text)
+    if not range_match:
+        return None
+    start_hm = _parse_hhmm(range_match.group(1))
+    end_hm = _parse_hhmm(range_match.group(2))
+    if not start_hm or not end_hm:
+        return None
+    try:
+        tz = ZoneInfo(timezone_name)
+    except Exception:
+        tz = ZoneInfo("UTC")
+    target_date = _extract_requested_date(text, timezone_name) or datetime.now(tz).date()
+    start_local = datetime(target_date.year, target_date.month, target_date.day, start_hm[0], start_hm[1], tzinfo=tz)
+    end_local = datetime(target_date.year, target_date.month, target_date.day, end_hm[0], end_hm[1], tzinfo=tz)
+    if end_local <= start_local:
+        end_local = end_local + timedelta(days=1)
+    return {"start_local": start_local, "end_local": end_local, "day_label": target_date.strftime("%d.%m.%Y")}
+
+
+def _process_new_task_wizard_text(
+    text: str,
+    db,
+    context: ContextEngine,
+    user: User,
+) -> tuple[str | None, InlineKeyboardMarkup | None]:
+    state = _wizard_state(context)
+    if not state:
+        return None, None
+    stage = str(state.get("stage") or "")
+    ysync = YouGileSyncService(db)
+
+    if stage == "await_description":
+        description = (text or "").strip()
+        if len(description) < 3:
+            return "Опиши задачу чуть подробнее (минимум 3 символа).", None
+        title = " ".join(description.split())[:120]
+        state["description"] = description
+        state["title"] = title
+        state["stage"] = "pick_project"
+        projects = ysync.list_projects(user.id)
+        if not projects:
+            return "Не вижу проектов в локальном кеше. Повтори чуть позже.", None
+        rows = [(p.project_id, p.title or "Без названия") for p in projects]
+        _set_wizard_state(context, state)
+        return "Выбери проект:", _new_task_pick_keyboard("project", rows)
+
+    if stage == "await_stickers":
+        raw = (text or "").strip()
+        stickers: dict[str, str] = {}
+        if raw not in {"-", "нет", "no"}:
+            parts = [item.strip() for item in re.split(r"[,\n;]+", raw) if item.strip()]
+            stickers = {part: "1" for part in parts[:12]}
+        state["stickers"] = stickers
+        if state.get("know_time"):
+            state["stage"] = "await_time_picker"
+            webapp_url = _time_picker_webapp_url(user, context)
+            if webapp_url:
+                _set_wizard_state(context, state)
+                return "Открой выбор времени через Telegram Mini App:", _new_task_time_webapp_keyboard(webapp_url)
+            state["stage"] = "await_time"
+            _set_wizard_state(context, state)
+            return (
+                "Для выбора времени нужен `TELEGRAM_WEBAPP_BASE_URL`. "
+                "Пока можно ввести вручную: `16.03 20:00-21:00`.",
+                None,
+            )
+        state["stage"] = "confirm"
+        _set_wizard_state(context, state)
+        summary = (
+            f"Проверь задачу:\n"
+            f"- Проект: {state.get('project_title')}\n"
+            f"- Доска: {state.get('board_title')}\n"
+            f"- Колонка: {state.get('column_title')}\n"
+            f"- Название: {state.get('title')}\n"
+            f"- Стикеры: {', '.join((state.get('stickers') or {}).keys()) or 'нет'}\n"
+            f"- Время: не задано"
+        )
+        return summary, _new_task_confirm_keyboard()
+
+    if stage == "await_time_picker":
+        return "Нажми кнопку `Выбрать дату и время` в Mini App.", None
+
+    if stage == "await_time":
+        tz_name = context.get_memory("calendar_timezone") or user.timezone or settings.timezone
+        slot = _parse_calendar_slot_input(text, tz_name)
+        if not slot:
+            return "Не понял время. Пример: `16.03 20:00-21:00`.", None
+        state["calendar_slot"] = {
+            "start_utc": slot["start_local"].astimezone(timezone.utc).replace(tzinfo=None).isoformat(),
+            "end_utc": slot["end_local"].astimezone(timezone.utc).replace(tzinfo=None).isoformat(),
+            "timezone": tz_name,
+            "day_label": slot["day_label"],
+        }
+        state["stage"] = "confirm"
+        _set_wizard_state(context, state)
+        summary = (
+            f"Проверь задачу:\n"
+            f"- Проект: {state.get('project_title')}\n"
+            f"- Доска: {state.get('board_title')}\n"
+            f"- Колонка: {state.get('column_title')}\n"
+            f"- Название: {state.get('title')}\n"
+            f"- Стикеры: {', '.join((state.get('stickers') or {}).keys()) or 'нет'}\n"
+            f"- Время: {slot['start_local'].strftime('%H:%M')}–{slot['end_local'].strftime('%H:%M')} ({slot['day_label']})"
+        )
+        return summary, _new_task_confirm_keyboard()
+
+    return None, None
+
+
 @router.callback_query(F.data.startswith("quiz:"))
 async def training_quiz_callback_handler(callback: CallbackQuery) -> None:
     payload = (callback.data or "").split(":")
@@ -1480,6 +1664,204 @@ async def training_quiz_callback_handler(callback: CallbackQuery) -> None:
             ks.add_turn(role="assistant", content=text, intent="training_quiz_question")
 
 
+@router.callback_query(F.data.startswith("ytask:"))
+async def new_task_wizard_callback_handler(callback: CallbackQuery) -> None:
+    raw = (callback.data or "").strip()
+    parts = raw.split(":")
+    if len(parts) < 2:
+        await callback.answer("Некорректные данные.", show_alert=False)
+        return
+    if not callback.from_user:
+        await callback.answer("Пользователь не найден.", show_alert=False)
+        return
+
+    with SessionLocal() as db:
+        user = _ensure_user(db, callback.from_user.id, callback.from_user.full_name if callback.from_user else "User")
+        context = ContextEngine(db, user.id)
+        ks = KnowledgeService(db, user.id)
+        ysync = YouGileSyncService(db)
+        state = _wizard_state(context)
+
+        if parts[1] == "cancel":
+            _clear_pending_action(context)
+            reply = "Ок, создание задачи отменено."
+            if callback.message:
+                await callback.message.answer(reply)
+            else:
+                await callback.bot.send_message(callback.from_user.id, reply)
+            await callback.answer("Отменено.", show_alert=False)
+            return
+
+        if not state:
+            await callback.answer("Мастер создания задачи не активен.", show_alert=False)
+            return
+
+        if parts[1] == "time" and len(parts) == 3:
+            know_time = parts[2] == "yes"
+            state["know_time"] = know_time
+            state["stage"] = "await_description"
+            _set_wizard_state(context, state)
+            reply = "Опиши задачу одним сообщением (это будет описание, а заголовок соберу автоматически)."
+            if callback.message:
+                try:
+                    await callback.message.edit_reply_markup(reply_markup=None)
+                except Exception:
+                    pass
+                await callback.message.answer(reply)
+            else:
+                await callback.bot.send_message(callback.from_user.id, reply)
+            await callback.answer("Принято.", show_alert=False)
+            return
+
+        if parts[1] == "project" and len(parts) == 3:
+            project_id = parts[2]
+            project = next((row for row in ysync.list_projects(user.id) if row.project_id == project_id), None)
+            if not project:
+                await callback.answer("Проект не найден. Обнови список.", show_alert=False)
+                return
+            state["project_id"] = project.project_id
+            state["project_title"] = project.title
+            state["stage"] = "pick_board"
+            boards = ysync.list_boards(user.id, project_id=project.project_id)
+            if not boards:
+                await callback.answer("У проекта нет досок.", show_alert=False)
+                return
+            _set_wizard_state(context, state)
+            rows = [(b.board_id, b.title or "Без названия") for b in boards]
+            if callback.message:
+                await callback.message.edit_text("Выбери доску:", reply_markup=_new_task_pick_keyboard("board", rows))
+            await callback.answer("Ок", show_alert=False)
+            return
+
+        if parts[1] == "board" and len(parts) == 3:
+            board_id = parts[2]
+            board = next((row for row in ysync.list_boards(user.id, project_id=state.get("project_id")) if row.board_id == board_id), None)
+            if not board:
+                await callback.answer("Доска не найдена.", show_alert=False)
+                return
+            state["board_id"] = board.board_id
+            state["board_title"] = board.title
+            state["stage"] = "pick_column"
+            columns = ysync.list_columns(user.id, project_id=state.get("project_id"), board_id=board.board_id)
+            if not columns:
+                await callback.answer("На доске нет колонок.", show_alert=False)
+                return
+            _set_wizard_state(context, state)
+            rows = [(c.column_id, c.title or "Без названия") for c in columns]
+            if callback.message:
+                await callback.message.edit_text("Выбери колонку (статус):", reply_markup=_new_task_pick_keyboard("column", rows))
+            await callback.answer("Ок", show_alert=False)
+            return
+
+        if parts[1] == "column" and len(parts) == 3:
+            column_id = parts[2]
+            column = next(
+                (
+                    row
+                    for row in ysync.list_columns(user.id, project_id=state.get("project_id"), board_id=state.get("board_id"))
+                    if row.column_id == column_id
+                ),
+                None,
+            )
+            if not column:
+                await callback.answer("Колонка не найдена.", show_alert=False)
+                return
+            state["column_id"] = column.column_id
+            state["column_title"] = column.title
+            state["stage"] = "await_stickers"
+            _set_wizard_state(context, state)
+            reply = "Добавь стикеры через запятую (например: важно,дом,быстро) или отправь `-` если без стикеров."
+            if callback.message:
+                try:
+                    await callback.message.edit_reply_markup(reply_markup=None)
+                except Exception:
+                    pass
+                await callback.message.answer(reply)
+            else:
+                await callback.bot.send_message(callback.from_user.id, reply)
+            await callback.answer("Ок", show_alert=False)
+            return
+
+        if parts[1] == "confirm" and len(parts) == 3:
+            if parts[2] == "no":
+                _clear_pending_action(context)
+                reply = "Ок, не создаю задачу."
+                if callback.message:
+                    await callback.message.answer(reply)
+                else:
+                    await callback.bot.send_message(callback.from_user.id, reply)
+                await callback.answer("Отменено.", show_alert=False)
+                return
+
+            title = str(state.get("title") or "").strip() or "Новая задача"
+            description = str(state.get("description") or "").strip() or None
+            column_id = str(state.get("column_id") or "").strip()
+            if not column_id:
+                await callback.answer("Не выбрана колонка.", show_alert=False)
+                return
+            task = ysync.create_task(
+                user.id,
+                title=title,
+                column_id=column_id,
+                description=description,
+                stickers=state.get("stickers") or {},
+            )
+            if not task:
+                await callback.answer("Не удалось создать задачу в YouGile.", show_alert=False)
+                return
+
+            extra = ""
+            if state.get("know_time") and isinstance(state.get("calendar_slot"), dict):
+                slot = state["calendar_slot"]
+                try:
+                    start_utc = datetime.fromisoformat(str(slot.get("start_utc")))
+                    end_utc = datetime.fromisoformat(str(slot.get("end_utc")))
+                except Exception:
+                    start_utc = None
+                    end_utc = None
+                if start_utc and end_utc:
+                    calendar_domain = CalendarDomainService(db)
+                    calendar_sync = CalendarSyncService(db)
+                    event = calendar_domain.create_local_event(
+                        user.id,
+                        settings.google_calendar_id,
+                        title,
+                        start_utc,
+                        end_utc,
+                        str(slot.get("timezone") or user.timezone or settings.timezone),
+                        details={"description": description},
+                    )
+                    calendar_sync.push_outbox(user.id, settings.google_calendar_id)
+                    ysync.update_task(
+                        user.id,
+                        task.task_id,
+                        {"ready_for_calendar": True, "linked_calendar_event_id": event.id},
+                    )
+                    extra = f"\nСразу добавил в календарь: {slot.get('day_label')} {start_utc.strftime('%H:%M')}-{end_utc.strftime('%H:%M')}."
+
+            _clear_pending_action(context)
+            reply = (
+                f"Готово. Создал задачу в YouGile.\n"
+                f"- Проект: {state.get('project_title')}\n"
+                f"- Доска: {state.get('board_title')}\n"
+                f"- Колонка: {state.get('column_title')}\n"
+                f"- Задача: {title}{extra}"
+            )
+            if callback.message:
+                try:
+                    await callback.message.edit_reply_markup(reply_markup=None)
+                except Exception:
+                    pass
+                await callback.message.answer(reply)
+            else:
+                await callback.bot.send_message(callback.from_user.id, reply)
+            ks.add_turn(role="assistant", content=reply, intent="yougile_new_task")
+            await callback.answer("Создано.", show_alert=False)
+            return
+
+        await callback.answer("Действие не распознано.", show_alert=False)
+
+
 @router.callback_query(F.data.startswith("pact:"))
 async def pending_action_callback_handler(callback: CallbackQuery) -> None:
     raw = (callback.data or "").strip().lower()
@@ -1515,6 +1897,60 @@ async def pending_action_callback_handler(callback: CallbackQuery) -> None:
             await callback.bot.send_message(callback.from_user.id, reply)
         await callback.answer("Принято.", show_alert=False)
         ks.add_turn(role="assistant", content=reply, intent="pending_action_result")
+
+
+@router.message(F.web_app_data)
+async def web_app_data_handler(message: Message) -> None:
+    if not message.web_app_data or not message.web_app_data.data:
+        return
+    with SessionLocal() as db:
+        user = _ensure_user(db, message.from_user.id, message.from_user.full_name if message.from_user else "User")
+        context = ContextEngine(db, user.id)
+        ks = KnowledgeService(db, user.id)
+        state = _wizard_state(context)
+        if not state or str(state.get("stage") or "") != "await_time_picker":
+            return
+        try:
+            payload = json.loads(message.web_app_data.data)
+        except Exception:
+            await message.answer("Не смог прочитать данные из mini app. Попробуй еще раз.")
+            return
+        if str(payload.get("kind") or "") != "yougile_task_time_picker":
+            return
+        start_local_iso = str(payload.get("start_local_iso") or "").strip()
+        end_local_iso = str(payload.get("end_local_iso") or "").strip()
+        tz_name = str(payload.get("timezone") or context.get_memory("calendar_timezone") or user.timezone or settings.timezone)
+        try:
+            start_naive = datetime.fromisoformat(start_local_iso)
+            end_naive = datetime.fromisoformat(end_local_iso)
+            tz = ZoneInfo(tz_name)
+            start_local = start_naive.replace(tzinfo=tz)
+            end_local = end_naive.replace(tzinfo=tz)
+        except Exception:
+            await message.answer("Некорректная дата/время из mini app. Выбери заново.")
+            return
+        if end_local <= start_local:
+            await message.answer("Время окончания должно быть позже начала.")
+            return
+        state["calendar_slot"] = {
+            "start_utc": start_local.astimezone(timezone.utc).replace(tzinfo=None).isoformat(),
+            "end_utc": end_local.astimezone(timezone.utc).replace(tzinfo=None).isoformat(),
+            "timezone": tz_name,
+            "day_label": start_local.strftime("%d.%m.%Y"),
+        }
+        state["stage"] = "confirm"
+        _set_wizard_state(context, state)
+        summary = (
+            f"Проверь задачу:\n"
+            f"- Проект: {state.get('project_title')}\n"
+            f"- Доска: {state.get('board_title')}\n"
+            f"- Колонка: {state.get('column_title')}\n"
+            f"- Название: {state.get('title')}\n"
+            f"- Стикеры: {', '.join((state.get('stickers') or {}).keys()) or 'нет'}\n"
+            f"- Время: {start_local.strftime('%H:%M')}–{end_local.strftime('%H:%M')} ({start_local.strftime('%d.%m.%Y')})"
+        )
+        await message.answer(summary, reply_markup=_new_task_confirm_keyboard())
+        ks.add_turn(role="assistant", content=summary, intent="yougile_new_task_time_selected")
 
 
 @router.message(F.text)
@@ -1558,6 +1994,21 @@ async def natural_chat_handler(message: Message) -> None:
             ks.add_turn(role="assistant", content="Sent welcome message", intent="welcome")
             return
 
+        if normalized_cmd in {"new_task", "новая задача", "новая задача +", "add task"}:
+            ysync = YouGileSyncService(db)
+            ysync.sync_all(user.id)
+            projects = ysync.list_projects(user.id)
+            if not projects:
+                reply = "Не вижу проектов YouGile. Проверь подключение и попробуй снова."
+                await message.answer(reply)
+                ks.add_turn(role="assistant", content=reply, intent="yougile_new_task_start")
+                return
+            _set_wizard_state(context, {"stage": "ask_time", "know_time": False})
+            reply = "Новая задача. Ты уже знаешь, когда будешь ее делать?"
+            await message.answer(reply, reply_markup=_new_task_time_choice_keyboard())
+            ks.add_turn(role="assistant", content=reply, intent="yougile_new_task_start")
+            return
+
         if normalized_cmd in {"agent_trace", "трейс агента"} or normalized_cmd.startswith(("agent_trace ", "трейс агента ")):
             limit = _agent_trace_limit(text, default_limit=3)
             reply = _agent_trace_text(db, user.id, limit)
@@ -1575,19 +2026,30 @@ async def natural_chat_handler(message: Message) -> None:
             _clear_pending_action(context)
             pending_action = None
 
-        processed_pending = _process_pending_action(
-            text,
-            context,
-            calendar_domain,
-            calendar_sync,
-            user.id,
-            provider_calendar_id,
-        )
-        if processed_pending:
-            await message.answer(processed_pending)
-            ks.add_turn(role="assistant", content=processed_pending, intent="pending_action_result")
-            _set_last_intent(context, "pending_action_result")
-            return
+        pending_type = str((pending_action or {}).get("type") or "")
+        if pending_type == "yougile_task_wizard":
+            wizard_reply, wizard_kb = _process_new_task_wizard_text(text, db, context, user)
+            if wizard_reply:
+                if wizard_kb:
+                    await message.answer(wizard_reply, reply_markup=wizard_kb)
+                else:
+                    await message.answer(wizard_reply)
+                ks.add_turn(role="assistant", content=wizard_reply, intent="yougile_new_task_wizard")
+                return
+        else:
+            processed_pending = _process_pending_action(
+                text,
+                context,
+                calendar_domain,
+                calendar_sync,
+                user.id,
+                provider_calendar_id,
+            )
+            if processed_pending:
+                await message.answer(processed_pending)
+                ks.add_turn(role="assistant", content=processed_pending, intent="pending_action_result")
+                _set_last_intent(context, "pending_action_result")
+                return
 
         if pending_action and pending_action.get("type") == "calendar_add_collect":
             if normalized_cmd in {"отмена", "cancel", "не надо", "стоп"}:

@@ -11,6 +11,7 @@ from app.database.models import User
 from app.services.calendar_sync_service import CalendarSyncService
 from app.services.notifications import NotificationService
 from app.services.sync_service import SyncService
+from app.services.yougile_sync_service import YouGileSyncService
 
 
 class BackgroundJobs:
@@ -47,8 +48,15 @@ class BackgroundJobs:
         with SessionLocal() as db:
             users = db.query(User).all()
             sync_service = SyncService(db)
+            yougile_sync = YouGileSyncService(db)
             for user in users:
-                sync_service.sync_yougile_tasks(user.id)
+                try:
+                    # Keep legacy task mirror + maintain full YouGile workspace cache.
+                    sync_service.sync_yougile_tasks(user.id)
+                    yougile_sync.sync_all(user.id)
+                except Exception:
+                    self.logger.exception("YouGile sync failed for user_id=%s", user.id)
+                    continue
 
     async def _calendar_incremental_sync_job(self) -> None:
         with SessionLocal() as db:

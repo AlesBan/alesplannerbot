@@ -1,4 +1,5 @@
 from datetime import datetime
+import json
 
 import httpx
 from dateutil import parser as date_parser
@@ -28,6 +29,15 @@ class YouGileService:
     def _resolve_api_token(self) -> str:
         if self._cached_token:
             return self._cached_token
+        want_specific_company = bool((self.settings.yougile_company_id or "").strip() or (self.settings.yougile_company_name or "").strip())
+        # If company targeting is configured, prefer credentials flow because it binds key to a selected company.
+        if want_specific_company and self.settings.yougile_email and self.settings.yougile_password:
+            token, api_base = self._create_key_via_credentials()
+            if token:
+                self._cached_token = token
+                if api_base:
+                    self._cached_api_base = api_base
+                return self._cached_token
         if self.settings.yougile_api_key and self.settings.yougile_api_key != "yougile-api":
             self._cached_token = self.settings.yougile_api_key
             self._cached_api_base = self._candidate_api_bases()[0]
@@ -62,6 +72,30 @@ class YouGileService:
                 return [row for row in value if isinstance(row, dict)]
         return []
 
+    def _contains_replacement_char(self, payload) -> bool:
+        if isinstance(payload, str):
+            return "�" in payload
+        if isinstance(payload, list):
+            return any(self._contains_replacement_char(item) for item in payload[:200])
+        if isinstance(payload, dict):
+            return any(self._contains_replacement_char(value) for value in list(payload.values())[:200])
+        return False
+
+    def _response_json(self, response: httpx.Response):
+        raw = response.content or b""
+        for encoding in ("utf-8", "cp1251"):
+            try:
+                payload = json.loads(raw.decode(encoding))
+            except Exception:
+                continue
+            if encoding == "utf-8" and self._contains_replacement_char(payload):
+                continue
+            return payload
+        try:
+            return response.json()
+        except Exception:
+            return {}
+
     def _pick_company(self, companies: list[dict]) -> dict | None:
         if not companies:
             return None
@@ -75,6 +109,21 @@ class YouGileService:
             for company in companies:
                 if wanted_name in str(company.get("name") or "").strip().lower():
                     return company
+            # Some accounts may return mojibake for non-latin names.
+            # Fallback: if query contains '&', pick a unique company containing '&'.
+            if "&" in wanted_name:
+                amp_candidates = [
+                    company
+                    for company in companies
+                    if "&" in str(company.get("name") or "").strip()
+                ]
+                if len(amp_candidates) == 1:
+                    return amp_candidates[0]
+            # Company was explicitly requested but not found in this result set.
+            return None
+        if wanted_id:
+            # Company id was explicitly requested but not found in this result set.
+            return None
         return companies[0]
 
     def _create_key_via_credentials(self) -> tuple[str | None, str | None]:
@@ -97,10 +146,12 @@ class YouGileService:
                         )
                         if companies_resp.status_code >= 400:
                             continue
-                        companies = self._extract_items(companies_resp.json())
+                        companies = self._extract_items(self._response_json(companies_resp))
                         if companies:
                             break
                     company = self._pick_company(companies)
+                    if (self.settings.yougile_company_name or self.settings.yougile_company_id) and not company:
+                        continue
                     company_id = str((company or {}).get("id") or "").strip()
                     if not company_id:
                         continue
@@ -114,7 +165,7 @@ class YouGileService:
                         },
                     )
                     if keys_resp.status_code < 400:
-                        keys_list = self._extract_items(keys_resp.json())
+                        keys_list = self._extract_items(self._response_json(keys_resp))
                         if keys_list:
                             key = str(keys_list[0].get("key") or keys_list[0].get("Key") or "").strip()
                             if key:
@@ -129,7 +180,7 @@ class YouGileService:
                         },
                     )
                     if create_resp.status_code in {200, 201}:
-                        key = str((create_resp.json() or {}).get("key") or "").strip()
+                        key = str((self._response_json(create_resp) or {}).get("key") or "").strip()
                         if key:
                             return key, api_base
                 except Exception:
@@ -186,7 +237,7 @@ class YouGileService:
                 response = client.get(path, headers=self._headers())
                 if response.status_code >= 400:
                     continue
-                rows = self._extract_items(response.json())
+                rows = self._extract_items(self._response_json(response))
                 if rows:
                     return rows
             except Exception:
@@ -198,24 +249,33 @@ class YouGileService:
             response = client.get("/columns", headers=self._headers())
             if response.status_code >= 400:
                 return []
-            columns = self._extract_items(response.json())
+            columns = self._extract_items(self._response_json(response))
         except Exception:
             return []
-        collected: list[dict] = []
+        collected_map: dict[str, dict] = {}
         for column in columns[:30]:
             column_id = str(column.get("id") or "").strip()
+            board_id = str(column.get("boardId") or "").strip()
             if not column_id:
                 continue
             try:
                 response = client.get(f"/tasks?columnId={column_id}", headers=self._headers())
                 if response.status_code >= 400:
                     continue
-                for task in self._extract_items(response.json()):
-                    if task not in collected:
-                        collected.append(task)
+                for task in self._extract_items(self._response_json(response)):
+                    task_id = str(task.get("id") or "").strip()
+                    enriched = dict(task)
+                    if not enriched.get("columnId"):
+                        enriched["columnId"] = column_id
+                    if board_id and not enriched.get("boardId"):
+                        enriched["boardId"] = board_id
+                    if task_id:
+                        existing = collected_map.get(task_id, {})
+                        existing.update(enriched)
+                        collected_map[task_id] = existing
             except Exception:
                 continue
-        return collected
+        return list(collected_map.values())
 
     def fetch_tasks(self, user_id: int) -> list[dict]:
         _ = user_id
@@ -225,9 +285,9 @@ class YouGileService:
         raw_tasks: list[dict] = []
         api_base = self._cached_api_base or self._candidate_api_bases()[0]
         with httpx.Client(base_url=api_base, timeout=20) as client:
-            raw_tasks = self._fetch_tasks_direct(client)
+            raw_tasks = self._fetch_tasks_via_columns(client)
             if not raw_tasks:
-                raw_tasks = self._fetch_tasks_via_columns(client)
+                raw_tasks = self._fetch_tasks_direct(client)
 
         tasks: list[dict] = []
         for row in raw_tasks:
@@ -247,6 +307,194 @@ class YouGileService:
                 }
             )
         return tasks
+
+    def _api_client(self) -> httpx.Client | None:
+        if not self._resolve_api_token():
+            return None
+        api_base = self._cached_api_base or self._candidate_api_bases()[0]
+        return httpx.Client(base_url=api_base, timeout=20)
+
+    def list_projects(self) -> list[dict]:
+        client = self._api_client()
+        if not client:
+            return []
+        with client:
+            try:
+                response = client.get("/projects", headers=self._headers())
+                if response.status_code >= 400:
+                    return []
+                return self._extract_items(self._response_json(response))
+            except Exception:
+                return []
+
+    def list_columns(self) -> list[dict]:
+        client = self._api_client()
+        if not client:
+            return []
+        with client:
+            try:
+                response = client.get("/columns", headers=self._headers())
+                if response.status_code >= 400:
+                    return []
+                return self._extract_items(self._response_json(response))
+            except Exception:
+                return []
+
+    def list_boards(self) -> list[dict]:
+        client = self._api_client()
+        if not client:
+            return []
+        with client:
+            try:
+                response = client.get("/boards", headers=self._headers())
+                if response.status_code >= 400:
+                    return []
+                return self._extract_items(self._response_json(response))
+            except Exception:
+                return []
+
+    def list_tasks_raw(self) -> list[dict]:
+        client = self._api_client()
+        if not client:
+            return []
+        with client:
+            rows = self._fetch_tasks_via_columns(client)
+            if rows:
+                return rows
+            return self._fetch_tasks_direct(client)
+
+    def create_project(self, title: str) -> dict | None:
+        client = self._api_client()
+        if not client:
+            return None
+        with client:
+            try:
+                response = client.post("/projects", headers=self._headers(), json={"title": title})
+                if response.status_code >= 400:
+                    return None
+                payload = self._response_json(response)
+                return payload if isinstance(payload, dict) else None
+            except Exception:
+                return None
+
+    def update_project(self, project_id: str, patch: dict) -> dict | None:
+        client = self._api_client()
+        if not client:
+            return None
+        with client:
+            try:
+                response = client.put(f"/projects/{project_id}", headers=self._headers(), json=patch)
+                if response.status_code >= 400:
+                    return None
+                data = self._response_json(response)
+                return data if isinstance(data, dict) else {"id": project_id}
+            except Exception:
+                return None
+
+    def delete_project(self, project_id: str) -> bool:
+        payload = {"deleted": True}
+        return self.update_project(project_id, payload) is not None
+
+    def create_column(self, title: str, project_id: str, color: int | None = None) -> dict | None:
+        client = self._api_client()
+        if not client:
+            return None
+        payload = {"title": title, "boardId": project_id}
+        if color is not None:
+            payload["color"] = int(color)
+        with client:
+            try:
+                response = client.post("/columns", headers=self._headers(), json=payload)
+                if response.status_code >= 400:
+                    return None
+                payload = self._response_json(response)
+                return payload if isinstance(payload, dict) else None
+            except Exception:
+                return None
+
+    def update_column(self, column_id: str, patch: dict) -> dict | None:
+        client = self._api_client()
+        if not client:
+            return None
+        with client:
+            try:
+                response = client.put(f"/columns/{column_id}", headers=self._headers(), json=patch)
+                if response.status_code >= 400:
+                    return None
+                data = self._response_json(response)
+                return data if isinstance(data, dict) else {"id": column_id}
+            except Exception:
+                return None
+
+    def delete_column(self, column_id: str) -> bool:
+        return self.update_column(column_id, {"deleted": True}) is not None
+
+    def create_task_raw(
+        self,
+        title: str,
+        column_id: str,
+        description: str | None = None,
+        assigned: list[str] | None = None,
+        stickers: dict[str, str] | None = None,
+    ) -> dict | None:
+        client = self._api_client()
+        if not client:
+            return None
+        payload: dict = {"title": title, "columnId": column_id}
+        if description is not None:
+            payload["description"] = description
+        if assigned:
+            payload["assigned"] = assigned
+        if stickers:
+            payload["stickers"] = stickers
+        with client:
+            try:
+                response = client.post("/tasks", headers=self._headers(), json=payload)
+                if response.status_code >= 400:
+                    return None
+                data = self._response_json(response)
+                if isinstance(data, dict) and data.get("id"):
+                    return self.get_task_by_id(str(data["id"])) or data
+                return data if isinstance(data, dict) else None
+            except Exception:
+                return None
+
+    def get_task_by_id(self, task_id: str) -> dict | None:
+        client = self._api_client()
+        if not client:
+            return None
+        with client:
+            try:
+                response = client.get(f"/tasks/{task_id}", headers=self._headers())
+                if response.status_code >= 400:
+                    return None
+                data = self._response_json(response)
+                return data if isinstance(data, dict) else None
+            except Exception:
+                return None
+
+    def update_task_raw(self, task_id: str, patch: dict) -> dict | None:
+        client = self._api_client()
+        if not client:
+            return None
+        with client:
+            try:
+                response = client.put(f"/tasks/{task_id}", headers=self._headers(), json=patch)
+                if response.status_code >= 400:
+                    return None
+                fresh = self.get_task_by_id(task_id)
+                if fresh:
+                    return fresh
+                data = self._response_json(response)
+                return data if isinstance(data, dict) else {"id": task_id}
+            except Exception:
+                return None
+
+    def move_task(self, task_id: str, target_column_id: str) -> dict | None:
+        return self.update_task_raw(task_id, {"columnId": target_column_id})
+
+    def delete_task(self, task_id: str) -> bool:
+        return self.update_task_raw(task_id, {"deleted": True}) is not None
 
     def mark_task_scheduled(self, external_ref: str) -> None:
         if not self._resolve_api_token():
